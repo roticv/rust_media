@@ -1,0 +1,15 @@
+[package]
+name = "rust_media_cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tool for rust_media - media conversion and processing"
+
+[[bin]]
+name = "rust_media"
+path = "src/main.rs"
+
+[dependencies]
+rust_media = { path = "../rust_media" }

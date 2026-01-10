@@ -1,0 +1,10 @@
+[package]
+name = "rust_media_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types and traits for rust_media - Packet, Frame, demuxer/decoder/encoder/muxer traits"
+
+[dependencies]

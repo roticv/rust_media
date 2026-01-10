@@ -1,0 +1,11 @@
+[package]
+name = "rust_media_format"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Container format implementations for rust_media - MP4, MKV, WebM demuxers and muxers"
+
+[dependencies]
+rust_media_core = { workspace = true }

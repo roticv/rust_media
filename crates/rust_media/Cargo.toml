@@ -1,0 +1,22 @@
+[package]
+name = "rust_media"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A Rust-based media processing framework (FFmpeg equivalent) with streaming APIs"
+
+[dependencies]
+rust_media_core = { workspace = true }
+rust_media_format = { workspace = true }
+rust_media_codec = { workspace = true }
+
+[features]
+default = []
+# Enable all format support
+all-formats = []
+# Enable all codec support
+all-codecs = []
+# Enable everything
+full = ["all-formats", "all-codecs"]

@@ -1,0 +1,11 @@
+[package]
+name = "rust_media_codec"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Codec implementations for rust_media - H.264, VP9, AV1, AAC, Opus decoders and encoders"
+
+[dependencies]
+rust_media_core = { workspace = true }
