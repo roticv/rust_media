@@ -62,6 +62,7 @@ Input File → Demuxer → Packets → Decoder → Frames → Filter → Frames 
 
 - **Demuxer**: Streams packets one at a time from containers
 - **Decoder**: send/receive pattern for incremental decoding
+- **Filter**: Processes frames incrementally (scale, crop, convert, etc.)
 - **Encoder**: send/receive pattern for incremental encoding
 - **Muxer**: Writes packets one at a time to containers
 
@@ -79,8 +80,11 @@ This project is in early development. Current status:
 - ✅ Core data structures (Packet, Frame)
 - ✅ Trait definitions (Demuxer, Decoder, Encoder, Muxer)
 - ✅ Workspace structure
-- 🚧 Container format implementations (MP4, MKV, WebM)
+- ✅ **PCM codec** (decoder + encoder)
+- ✅ **WAV demuxer** (read PCM from WAV files)
+- 🚧 Container format implementations (MP4, MKV, WebM muxers)
 - 🚧 Codec implementations (H.264, VP9, AV1, AAC, Opus)
+- 📋 Filter system (scale, crop, format conversion, etc.) - Planned
 - 🚧 CLI tool
 
 ## Contributing

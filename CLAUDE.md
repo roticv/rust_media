@@ -31,6 +31,10 @@ rust_media/
 │   │   ├── Video: H.264, VP9, AV1
 │   │   └── Audio: PCM, AAC, Opus
 │   │
+│   ├── rust_media_filter/  # Filter implementations (planned)
+│   │   ├── Video: scale, crop, overlay, rotate
+│   │   └── Audio: resample, mix, volume
+│   │
 │   ├── rust_media/         # Main library (re-exports)
 │   │   └── Convenience crate that re-exports all components
 │   │
@@ -45,6 +49,7 @@ rust_media/
 - **rust_media_core**: Foundation - all other crates depend on this
 - **rust_media_format**: Implements Demuxer and Muxer traits for containers
 - **rust_media_codec**: Implements Decoder and Encoder traits for codecs
+- **rust_media_filter**: Implements Filter trait for frame processing (planned)
 - **rust_media**: Main public API - users typically only need this
 - **rust_media_cli**: Binary executable for command-line usage
 
@@ -150,10 +155,12 @@ Both structures support:
 
 The project follows a phased development approach:
 
-#### 1. Core Data Structures (Foundation)
+#### 1. Core Data Structures (Foundation) ✅ COMPLETED
 Implement Packet and Frame abstractions with support for various media types. This forms the foundation for all subsequent work.
 
-#### 2. Integration Test Framework
+**Status**: Core types (Packet, Frame) and all traits (Demuxer, Decoder, Encoder, Muxer) are implemented in `rust_media_core`.
+
+#### 2. Integration Test Framework 🚧 PLANNED
 Build comprehensive testing infrastructure including:
 - Demuxing/decoding validation
 - Encoding/muxing validation
@@ -161,9 +168,12 @@ Build comprehensive testing infrastructure including:
 - Performance benchmarking
 - Reference file generation and comparison
 
-#### 3. Container Format and Codec Support
+#### 3. Container Format and Codec Support 🚧 IN PROGRESS
+
+**Status**: Workspace structure created with `rust_media_format` and `rust_media_codec` crates. Implementations needed.
 
 **Container Formats** (demuxers/muxers):
+- ✅ **WAV** (RIFF WAVE): PCM audio demuxer **IMPLEMENTED** in `rust_media_format/src/wav/demuxer.rs`
 - MP4, MOV (ISO Base Media File Format)
 - MKV (Matroska)
 - WebM (Matroska subset)
@@ -174,7 +184,7 @@ Build comprehensive testing infrastructure including:
 - AV1
 
 **Audio Codecs** (decoders/encoders) - Priority:
-- **PCM** (Pulse Code Modulation): Raw uncompressed audio - fundamental for all audio processing. Required first as it's the format all compressed audio decodes to and encodes from. Critical for validation and testing.
+- ✅ **PCM** (Pulse Code Modulation): Raw uncompressed audio - fundamental for all audio processing. **IMPLEMENTED** in `rust_media_codec/src/audio/pcm.rs`
 - AAC: LC, HE (AAC+), HEv2 (AAC++ / eAAC+)
 - Opus
 
@@ -191,20 +201,28 @@ Build comprehensive testing infrastructure including:
 - **Vorbis**: Open audio codec (used in WebM)
 - **FLAC**: Lossless audio codec
 
-#### 4. Color Space Handling
+#### 4. Color Space Handling 🚧 PLANNED
 Support for color conversions and bit-depth transformations:
 - 8-bit ↔ 10-bit conversions
 - YUV ↔ RGB conversions
 - Color space metadata handling
 
-#### 5. Filter Graph System
+#### 5. Filter Graph System 🚧 PLANNED
 Build a flexible filtering system that:
 - Supports composable filter chains
 - Allows CLI-based filter graph construction
 - Handles video and audio processing
 - Enables common operations (scaling, cropping, mixing, etc.)
 
-#### 6. FFmpeg CLI Compatibility
+**Status**: Planned for future development after core codec support is implemented.
+
+**Key Requirements**:
+- **Streaming API**: Filters must operate on frames incrementally (send/receive pattern)
+- **Graph construction**: Support both programmatic and CLI-based filter graph creation
+- **Zero-copy where possible**: Minimize frame copying in filter chains
+- **Common filters**: Scale, crop, overlay, rotate, format conversion, audio mixing, resampling
+
+#### 6. FFmpeg CLI Compatibility 🚧 PLANNED
 Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing migration and adoption.
 
 ## Design Philosophy

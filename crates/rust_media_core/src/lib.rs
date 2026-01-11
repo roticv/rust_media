@@ -32,6 +32,6 @@ pub use types::{MediaType, PixelFormat, SampleFormat, ColorSpace, ColorRange};
 pub use error::{Error, Result};
 pub use stream::{StreamInfo, StreamParams, VideoStreamParams, AudioStreamParams, ContainerInfo};
 pub use demuxer::{Demuxer, DemuxerBuilder, DemuxerOptions, FormatDetection};
-pub use decoder::{Decoder, DecoderConfig, DecoderOptions, CodecId};
-pub use encoder::{Encoder, EncoderConfig, EncoderOptions};
+pub use decoder::{Decoder, DecoderConfig, DecoderOptions, DecoderCapabilities, CodecId};
+pub use encoder::{Encoder, EncoderConfig, EncoderOptions, EncoderCapabilities};
 pub use muxer::{Muxer, MuxerBuilder, MuxerOptions};

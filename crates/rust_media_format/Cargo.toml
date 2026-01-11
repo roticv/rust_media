@@ -9,3 +9,6 @@ description = "Container format implementations for rust_media - MP4, MKV, WebM 
 
 [dependencies]
 rust_media_core = { workspace = true }
+
+[dev-dependencies]
+rust_media_codec = { path = "../rust_media_codec" }
