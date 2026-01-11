@@ -11,8 +11,8 @@
 //!
 //! # Audio Codecs
 //! - **PCM** (raw audio) - ✅ Implemented
+//! - **Opus** - ✅ Implemented
 //! - AAC (LC, HE, HEv2) (planned)
-//! - Opus (planned)
 //! - MP3 (future)
 //! - Vorbis (future)
 //! - FLAC (future)
@@ -25,6 +25,7 @@ pub mod audio;
 // pub mod video;
 
 // Re-export commonly used codecs
+pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
 
 #[cfg(test)]

@@ -28,8 +28,8 @@ rust_media/
 │   │   └── WebM demuxer/muxer
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: H.264, VP9, AV1
-│   │   └── Audio: PCM, AAC, Opus
+│   │   ├── Video: H.264, VP9, AV1 (planned)
+│   │   └── Audio: PCM ✅, Opus ✅, AAC (planned)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)
 │   │   ├── Video: scale, crop, overlay, rotate
@@ -185,8 +185,10 @@ Build comprehensive testing infrastructure including:
 
 **Audio Codecs** (decoders/encoders) - Priority:
 - ✅ **PCM** (Pulse Code Modulation): Raw uncompressed audio - fundamental for all audio processing. **IMPLEMENTED** in `rust_media_codec/src/audio/pcm.rs`
+- ✅ **Opus**: Lossy codec for speech and music, optimized for low-latency transmission. **IMPLEMENTED** in `rust_media_codec/src/audio/opus.rs`
+  - Requires: libopus (install via `brew install opus` on macOS, `apt-get install libopus-dev` on Linux)
+  - Supports: 8, 12, 16, 24, 48 kHz sample rates, mono and stereo
 - AAC: LC, HE (AAC+), HEv2 (AAC++ / eAAC+)
-- Opus
 
 **Image Codecs** (for thumbnails, still images) - Priority:
 - JPEG
@@ -262,11 +264,17 @@ Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing
   - Bounded memory usage regardless of input file size
   - Data flows through the pipeline without buffering entire streams
 
-- **PCM audio codec should be implemented first** as it's the foundation for all audio processing:
+- **PCM audio codec is the foundation** for all audio processing:
   - All compressed audio codecs (AAC, Opus, etc.) decode to PCM format
   - PCM is the format that audio filters operate on
   - PCM is essential for validation (comparing decoded output against reference)
   - PCM encoder/decoder is trivial (mostly pass-through) making it ideal for testing the pipeline
+
+- **Opus codec is implemented** as the first compressed audio codec:
+  - Uses libopus via the audiopus crate (requires system libopus)
+  - Excellent for low-latency VoIP, streaming, and music
+  - Provides compression ratios of ~10x with good quality
+  - See `examples/opus_example.rs` for usage demonstration
 
 - Filter graph should support both programmatic and CLI-based construction
 

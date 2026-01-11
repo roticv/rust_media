@@ -9,3 +9,4 @@ description = "Codec implementations for rust_media - H.264, VP9, AV1, AAC, Opus
 
 [dependencies]
 rust_media_core = { workspace = true }
+audiopus = "0.3.0-rc.0"

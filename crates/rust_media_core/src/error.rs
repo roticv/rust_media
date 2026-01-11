@@ -39,6 +39,12 @@ pub enum Error {
     /// Feature not implemented
     NotImplemented(String),
 
+    /// Decoding error
+    Decode(String),
+
+    /// Encoding error
+    Encode(String),
+
     /// Generic error with message
     Other(String),
 }
@@ -56,6 +62,8 @@ impl fmt::Display for Error {
             Error::AllocationFailed(msg) => write!(f, "Allocation failed: {}", msg),
             Error::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
             Error::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
+            Error::Decode(msg) => write!(f, "Decode error: {}", msg),
+            Error::Encode(msg) => write!(f, "Encode error: {}", msg),
             Error::Other(msg) => write!(f, "{}", msg),
         }
     }

@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (MP4, MKV, WebM)
-- **Codec** support (H.264, VP9, AV1, AAC, Opus, PCM)
+- **Codec** support (PCM, Opus implemented; H.264, VP9, AV1, AAC planned)
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -81,9 +81,10 @@ This project is in early development. Current status:
 - ✅ Trait definitions (Demuxer, Decoder, Encoder, Muxer)
 - ✅ Workspace structure
 - ✅ **PCM codec** (decoder + encoder)
+- ✅ **Opus codec** (decoder + encoder)
 - ✅ **WAV demuxer** (read PCM from WAV files)
 - 🚧 Container format implementations (MP4, MKV, WebM muxers)
-- 🚧 Codec implementations (H.264, VP9, AV1, AAC, Opus)
+- 🚧 Codec implementations (H.264, VP9, AV1, AAC)
 - 📋 Filter system (scale, crop, format conversion, etc.) - Planned
 - 🚧 CLI tool
 
