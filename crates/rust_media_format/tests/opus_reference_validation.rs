@@ -55,21 +55,23 @@ fn calculate_snr(reference: &[u8], decoded: &[u8]) -> f64 {
 
 #[test]
 fn test_opus_decode_reference_validation() {
-    // Look for test files in workspace root
+    // Look for test files in test_assets directory
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let mut root_path = std::path::PathBuf::from(manifest_dir);
     root_path.pop(); // crates
     root_path.pop(); // rust_media root
+    root_path.push("test_assets");
 
     let reference_wav = root_path.join("reference.wav");
     let opus_webm = root_path.join("reference_opus.webm");
 
     // Skip test if files don't exist
     if !reference_wav.exists() || !opus_webm.exists() {
-        eprintln!("Skipping test: reference files not found");
+        eprintln!("Skipping test: reference files not found in {:?}", root_path);
         eprintln!("Create them with:");
-        eprintln!("  ffmpeg -f lavfi -i \"sine=frequency=440:duration=1\" -ar 48000 -ac 2 reference.wav");
-        eprintln!("  ffmpeg -i reference.wav -c:a libopus -b:a 64k reference_opus.webm");
+        eprintln!("  mkdir -p test_assets");
+        eprintln!("  ffmpeg -f lavfi -i \"sine=frequency=440:duration=1\" -ar 48000 -ac 2 test_assets/reference.wav");
+        eprintln!("  ffmpeg -i test_assets/reference.wav -c:a libopus -b:a 64k test_assets/reference_opus.webm");
         return;
     }
 
@@ -196,7 +198,10 @@ fn test_opus_decode_reference_validation() {
 
     // Save decoded output for manual inspection if needed
     if std::env::var("SAVE_DECODED").is_ok() {
-        let decoded_path = root_path.join("decoded_opus.pcm");
+        let mut decoded_path = root_path.clone();
+        decoded_path.pop(); // Back to rust_media root
+        decoded_path.push("test_assets");
+        decoded_path.push("decoded_opus.pcm");
         let mut file = File::create(&decoded_path).expect("Failed to create decoded file");
         file.write_all(&decoded_pcm).expect("Failed to write decoded data");
         println!("\n  Saved decoded PCM to: {:?}", decoded_path);
@@ -214,10 +219,11 @@ fn test_webm_opus_basic_decode() {
     let mut root_path = std::path::PathBuf::from(manifest_dir);
     root_path.pop();
     root_path.pop();
+    root_path.push("test_assets");
 
     let test_file = root_path.join("test_sine_opus.webm");
     if !test_file.exists() {
-        eprintln!("Skipping: test_sine_opus.webm not found");
+        eprintln!("Skipping: test_sine_opus.webm not found in {:?}", root_path);
         return;
     }
 
@@ -255,6 +261,7 @@ fn test_webm_demuxer_structure() {
     let mut root_path = std::path::PathBuf::from(manifest_dir);
     root_path.pop();
     root_path.pop();
+    root_path.push("test_assets");
 
     let test_file = root_path.join("test_sine_opus.webm");
 

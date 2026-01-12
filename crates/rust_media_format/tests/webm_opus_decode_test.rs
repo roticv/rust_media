@@ -14,21 +14,24 @@ fn test_webm_opus_pipeline() {
     // This test requires a test WebM file with Opus audio
     // Create it with: ffmpeg -f lavfi -i "sine=frequency=440:duration=1" -c:a libopus test_sine_opus.webm
 
-    // Look for test file in workspace root
+    // Look for test file in test_assets directory
     let webm_path = std::env::var("CARGO_MANIFEST_DIR")
         .map(|dir| {
             let mut path = std::path::PathBuf::from(dir);
             path.pop(); // Go up from rust_media_format to crates
             path.pop(); // Go up from crates to rust_media root
+            path.push("test_assets");
             path.push("test_sine_opus.webm");
             path
         })
-        .unwrap_or_else(|_| std::path::PathBuf::from("test_sine_opus.webm"));
+        .unwrap_or_else(|_| std::path::PathBuf::from("test_assets/test_sine_opus.webm"));
 
     // Skip test if file doesn't exist
     if !webm_path.exists() {
         eprintln!("Skipping test: {:?} not found", webm_path);
-        eprintln!("Create it with: ffmpeg -f lavfi -i \"sine=frequency=440:duration=1\" -c:a libopus test_sine_opus.webm");
+        eprintln!("Create it with:");
+        eprintln!("  mkdir -p test_assets");
+        eprintln!("  ffmpeg -f lavfi -i \"sine=frequency=440:duration=1\" -c:a libopus test_assets/test_sine_opus.webm");
         return;
     }
 

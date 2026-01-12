@@ -18,7 +18,9 @@ fn main() {
     if args.len() < 2 {
         eprintln!("Usage: {} <webm_file>", args[0]);
         eprintln!("\nThis example reads a WebM file with Opus audio and decodes it to PCM.");
-        eprintln!("You can create a test WebM file with:");
+        eprintln!("You can use the test file:");
+        eprintln!("  cargo run -p rust_media_format --example webm_opus_pipeline test_assets/test_sine_opus.webm");
+        eprintln!("\nOr create your own with:");
         eprintln!("  ffmpeg -f lavfi -i \"sine=frequency=440:duration=1\" -c:a libopus test.webm");
         std::process::exit(1);
     }
