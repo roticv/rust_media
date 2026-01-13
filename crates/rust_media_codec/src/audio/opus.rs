@@ -194,11 +194,16 @@ impl Decoder for OpusDecoder {
 /// Opus Audio Encoder
 ///
 /// Encodes PCM audio frames into Opus packets using libopus.
+/// Handles arbitrary input frame sizes by buffering samples until
+/// a valid Opus frame size is accumulated (20ms / 960 samples @ 48kHz).
 pub struct OpusEncoder {
     stream_info: StreamInfo,
     encoder: OpusEncoderImpl,
     flushed: bool,
-    buffer: Option<Frame>,
+    sample_buffer: Vec<i16>,    // Buffer for accumulating samples
+    frame_size: usize,          // Target frame size in samples per channel (960 for 20ms @ 48kHz)
+    current_pts: i64,           // PTS for the next output packet
+    buffered_frames: Vec<Packet>, // Encoded packets waiting to be retrieved
 }
 
 impl OpusEncoder {
@@ -241,11 +246,25 @@ impl OpusEncoder {
         let encoder = OpusEncoderImpl::new(sample_rate, channels, audiopus::Application::Voip)
             .map_err(|e| Error::Config(format!("Failed to create Opus encoder: {:?}", e)))?;
 
+        // Calculate frame size: 20ms is standard for Opus
+        // Frame size in samples per channel
+        let frame_size = match audio_params.sample_rate {
+            8000 => 160,   // 20ms at 8kHz
+            12000 => 240,  // 20ms at 12kHz
+            16000 => 320,  // 20ms at 16kHz
+            24000 => 480,  // 20ms at 24kHz
+            48000 => 960,  // 20ms at 48kHz
+            _ => 960,      // Default fallback
+        };
+
         Ok(Self {
             stream_info,
             encoder,
             flushed: false,
-            buffer: None,
+            sample_buffer: Vec::new(),
+            frame_size,
+            current_pts: 0,
+            buffered_frames: Vec::new(),
         })
     }
 
@@ -268,6 +287,43 @@ impl OpusEncoder {
 
         Self::new(stream_info)
     }
+
+    /// Helper function to encode one complete frame from the sample buffer
+    fn encode_frame(&mut self, audio_params: &AudioStreamParams) -> Result<()> {
+        let total_samples_needed = self.frame_size * audio_params.channels;
+
+        // Take exactly the number of samples we need
+        let input: Vec<i16> = self.sample_buffer.drain(..total_samples_needed).collect();
+
+        // Maximum output size for Opus
+        let max_packet_size = 4000;
+        let mut output = vec![0u8; max_packet_size];
+
+        // Encode the frame
+        let encoded_size = self
+            .encoder
+            .encode(&input, &mut output)
+            .map_err(|e| Error::Encode(format!("Opus encode error: {:?}", e)))?;
+
+        // Truncate output to actual encoded size
+        output.truncate(encoded_size);
+
+        // Calculate duration in microseconds (20ms for standard frame)
+        let duration = (self.frame_size as u64 * 1_000_000) / audio_params.sample_rate as u64;
+
+        // Create packet
+        let packet = Packet::new(output, 0, MediaType::Audio)
+            .with_pts(self.current_pts)
+            .with_duration(duration as i64);
+
+        // Update PTS for next packet
+        self.current_pts += duration as i64;
+
+        // Store encoded packet in buffer
+        self.buffered_frames.push(packet);
+
+        Ok(())
+    }
 }
 
 impl Encoder for OpusEncoder {
@@ -286,22 +342,6 @@ impl Encoder for OpusEncoder {
             ));
         }
 
-        // Store frame for encoding
-        self.buffer = Some(frame.clone());
-        Ok(())
-    }
-
-    fn receive_packet(&mut self) -> Result<Packet> {
-        if self.flushed {
-            return Err(Error::EndOfStream);
-        }
-
-        // Check if we have a frame to encode
-        let frame = match self.buffer.take() {
-            Some(f) => f,
-            None => return Err(Error::NeedMoreData),
-        };
-
         // Get audio parameters
         let audio_params = match &self.stream_info.params {
             StreamParams::Audio(params) => params,
@@ -319,50 +359,75 @@ impl Encoder for OpusEncoder {
             ));
         }
 
-        // Convert frame data (bytes) to i16 samples
-        let mut input = Vec::with_capacity(frame_data.len() / 2);
+        // Convert frame data (bytes) to i16 samples and add to buffer
         for i in (0..frame_data.len()).step_by(2) {
             let sample = i16::from_le_bytes([frame_data[i], frame_data[i + 1]]);
-            input.push(sample);
+            self.sample_buffer.push(sample);
         }
 
-        // Calculate number of samples per channel
-        let samples_per_channel = input.len() / audio_params.channels;
+        // Store PTS from first frame
+        if self.sample_buffer.len() == frame_data.len() / 2 {
+            self.current_pts = frame.pts().unwrap_or(0);
+        }
 
-        // Maximum output size for Opus
-        let max_packet_size = 4000;
-        let mut output = vec![0u8; max_packet_size];
+        // Calculate total samples needed for one frame (frame_size * channels)
+        let total_samples_needed = self.frame_size * audio_params.channels;
 
-        // Encode the frame - encode handles interleaved audio
-        let encoded_size = self
-            .encoder
-            .encode(&input, &mut output)
-            .map_err(|e| Error::Encode(format!("Opus encode error: {:?}", e)))?;
+        // Clone audio params to avoid borrow issues
+        let audio_params_clone = audio_params.clone();
 
-        // Truncate output to actual encoded size
-        output.truncate(encoded_size);
+        // Encode as many complete frames as we have buffered
+        while self.sample_buffer.len() >= total_samples_needed {
+            self.encode_frame(&audio_params_clone)?;
+        }
 
-        // Calculate duration in microseconds
-        let duration = (samples_per_channel as u64 * 1_000_000) / audio_params.sample_rate as u64;
+        Ok(())
+    }
 
-        // Create packet with appropriate PTS from frame
-        let pts = frame.pts().unwrap_or(0);
-        let packet = Packet::new(output, 0, MediaType::Audio)
-            .with_pts(pts)
-            .with_duration(duration as i64);
+    fn receive_packet(&mut self) -> Result<Packet> {
+        // Return buffered packets first
+        if !self.buffered_frames.is_empty() {
+            return Ok(self.buffered_frames.remove(0));
+        }
 
-        Ok(packet)
+        // If flushed and no more buffered packets, we're done
+        if self.flushed {
+            return Err(Error::EndOfStream);
+        }
+
+        // No packets available yet
+        Err(Error::NeedMoreData)
     }
 
     fn flush(&mut self) -> Result<()> {
+        // Encode any remaining samples in the buffer
+        if !self.sample_buffer.is_empty() {
+            let audio_params = match &self.stream_info.params {
+                StreamParams::Audio(params) => params.clone(),
+                _ => unreachable!(),
+            };
+
+            let total_samples_needed = self.frame_size * audio_params.channels;
+
+            // If we have partial samples, pad with silence to complete the frame
+            if self.sample_buffer.len() < total_samples_needed {
+                let samples_to_pad = total_samples_needed - self.sample_buffer.len();
+                self.sample_buffer.extend(vec![0i16; samples_to_pad]);
+            }
+
+            // Encode the final frame
+            self.encode_frame(&audio_params)?;
+        }
+
         self.flushed = true;
-        self.buffer = None;
         Ok(())
     }
 
     fn reset(&mut self) -> Result<()> {
         self.flushed = false;
-        self.buffer = None;
+        self.sample_buffer.clear();
+        self.buffered_frames.clear();
+        self.current_pts = 0;
         // Reset encoder state if needed
         // Note: libopus doesn't provide explicit reset, consider recreating encoder
         Ok(())
