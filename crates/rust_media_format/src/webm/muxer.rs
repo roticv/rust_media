@@ -99,13 +99,15 @@ impl<W: Write + Seek> WebmMuxer<W> {
 
     /// Writes the Segment header (with unknown size for streaming)
     fn write_segment_header(&mut self) -> Result<()> {
-        self.segment_start_position = self.position;
-        // Debug: store actual writer position before writing
-        let actual_pos_before = self.writer.stream_position()?;
+        // Get actual position before writing segment header
+        self.segment_start_position = self.writer.stream_position()?;
+
+        // Write segment header with unknown size
         write_master_header_unknown_size(&mut self.writer, element_id::SEGMENT)?;
-        let actual_pos_after = self.writer.stream_position()?;
-        let bytes_written = actual_pos_after - actual_pos_before;
-        self.position += bytes_written;
+
+        // Update position to actual stream position
+        self.position = self.writer.stream_position()?;
+
         Ok(())
     }
 
@@ -114,32 +116,33 @@ impl<W: Write + Seek> WebmMuxer<W> {
         let muxing_app = "rust_media WebM Muxer";
         let writing_app = "rust_media v0.1.0";
 
-        // Calculate Info size
-        let timecode_scale_size = 3 + 1 + 4; // ID + size + value
-        let muxing_app_size = 2 + 1 + muxing_app.len(); // ID + size + string
-        let writing_app_size = 2 + 1 + writing_app.len();
-
-        let total_size = timecode_scale_size + muxing_app_size + writing_app_size;
-
-        // Write Info master element
-        write_master_header(&mut self.writer, element_id::INFO, total_size as u64)?;
-        self.position += 4 + 1;
+        // Write Info contents to a buffer first to measure actual size
+        let mut info_buffer = std::io::Cursor::new(Vec::new());
 
         // Timecode Scale (1ms = 1,000,000 nanoseconds)
         write_uint_element(
-            &mut self.writer,
+            &mut info_buffer,
             element_id::TIMECODE_SCALE,
             self.timecode_scale,
         )?;
-        self.position += 8;
 
         // Muxing App
-        write_string_element(&mut self.writer, element_id::MUXING_APP, muxing_app)?;
-        self.position += muxing_app_size as u64;
+        write_string_element(&mut info_buffer, element_id::MUXING_APP, muxing_app)?;
 
         // Writing App
-        write_string_element(&mut self.writer, element_id::WRITING_APP, writing_app)?;
-        self.position += writing_app_size as u64;
+        write_string_element(&mut info_buffer, element_id::WRITING_APP, writing_app)?;
+
+        let info_data = info_buffer.into_inner();
+        let info_size = info_data.len() as u64;
+
+        // Write Info master element with actual measured size
+        write_master_header(&mut self.writer, element_id::INFO, info_size)?;
+
+        // Write the info data
+        self.writer.write_all(&info_data)?;
+
+        // Update position to actual stream position
+        self.position = self.writer.stream_position()?;
 
         Ok(())
     }
@@ -155,60 +158,26 @@ impl<W: Write + Seek> WebmMuxer<W> {
         // Clone streams to avoid borrow checker issues
         let streams = self.streams.clone();
 
-        // Calculate total size for all track entries
-        let mut track_entries_size = 0u64;
-        let mut track_entries = Vec::new();
+        // Write all track entries to a buffer first to measure actual size
+        let mut tracks_buffer = std::io::Cursor::new(Vec::new());
 
         for (idx, stream) in streams.iter().enumerate() {
-            let entry_size = self.calculate_track_entry_size(idx, stream)?;
-            track_entries.push(entry_size);
-            track_entries_size += entry_size + 1 + 1; // ID + size + data
+            self.write_track_entry_to_buffer(&mut tracks_buffer, idx, stream)?;
         }
 
-        // Write Tracks master element
-        write_master_header(&mut self.writer, element_id::TRACKS, track_entries_size)?;
-        self.position += 4 + 1;
+        let tracks_data = tracks_buffer.into_inner();
+        let tracks_size = tracks_data.len() as u64;
 
-        // Write each track entry
-        for (idx, stream) in streams.iter().enumerate() {
-            self.write_track_entry(idx, stream, track_entries[idx])?;
-        }
+        // Write Tracks master element with actual measured size
+        write_master_header(&mut self.writer, element_id::TRACKS, tracks_size)?;
+
+        // Write the tracks data
+        self.writer.write_all(&tracks_data)?;
+
+        // Update position to actual stream position
+        self.position = self.writer.stream_position()?;
 
         Ok(())
-    }
-
-    /// Calculates the size of a track entry
-    fn calculate_track_entry_size(&self, _track_idx: usize, stream: &StreamInfo) -> Result<u64> {
-        let track_number_size = 1 + 1 + 1; // ID + size + value
-        let track_uid_size = 2 + 1 + 4; // ID + size + value (4 bytes)
-        let track_type_size = 1 + 1 + 1; // ID + size + value (2 = audio)
-        let codec_id_size = 1 + 1 + 6; // ID + size + "A_OPUS"
-
-        let mut total_size = track_number_size + track_uid_size + track_type_size + codec_id_size;
-
-        // Audio parameters
-        if let StreamParams::Audio(params) = &stream.params {
-            let audio_size = self.calculate_audio_size(params);
-            total_size += 1 + 1 + audio_size; // Audio master element
-
-            // Opus requires CodecPrivate (OpusHead)
-            if stream.codec == "opus" {
-                let opus_head = self.create_opus_head(params);
-                total_size += 2 + 1 + opus_head.len() as u64; // CodecPrivate
-                total_size += 2 + 1 + 4; // CodecDelay
-                total_size += 2 + 1 + 4; // SeekPreRoll
-            }
-        }
-
-        Ok(total_size)
-    }
-
-    /// Calculates the size of the Audio element
-    fn calculate_audio_size(&self, _params: &AudioStreamParams) -> u64 {
-        let sampling_freq_size = 1 + 1 + 8; // ID + size + float64
-        let channels_size = 1 + 1 + 1; // ID + size + value
-
-        sampling_freq_size + channels_size
     }
 
     /// Creates OpusHead for CodecPrivate
@@ -227,36 +196,32 @@ impl<W: Write + Seek> WebmMuxer<W> {
         opus_head
     }
 
-    /// Writes a track entry
-    fn write_track_entry(
-        &mut self,
+    /// Writes a track entry to a buffer and returns the data
+    fn write_track_entry_to_buffer<Writer: Write>(
+        &self,
+        writer: &mut Writer,
         track_idx: usize,
         stream: &StreamInfo,
-        size: u64,
     ) -> Result<()> {
-        // Write TrackEntry master element
-        write_master_header(&mut self.writer, element_id::TRACK_ENTRY, size)?;
-        self.position += 1 + 1;
+        // Write track entry contents to a temp buffer first to measure size
+        let mut entry_buffer = std::io::Cursor::new(Vec::new());
 
         // Track Number (1-indexed)
         write_uint_element(
-            &mut self.writer,
+            &mut entry_buffer,
             element_id::TRACK_NUMBER,
             (track_idx + 1) as u64,
         )?;
-        self.position += 3;
 
         // Track UID (use track number as UID)
         write_uint_element(
-            &mut self.writer,
+            &mut entry_buffer,
             element_id::TRACK_UID,
             (track_idx + 1) as u64,
         )?;
-        self.position += 7;
 
         // Track Type (2 = audio)
-        write_uint_element(&mut self.writer, element_id::TRACK_TYPE, 2)?;
-        self.position += 3;
+        write_uint_element(&mut entry_buffer, element_id::TRACK_TYPE, 2)?;
 
         // Codec ID
         let codec_id_str = match stream.codec.as_str() {
@@ -269,8 +234,7 @@ impl<W: Write + Seek> WebmMuxer<W> {
                 )))
             }
         };
-        write_string_element(&mut self.writer, element_id::CODEC_ID, codec_id_str)?;
-        self.position += 8;
+        write_string_element(&mut entry_buffer, element_id::CODEC_ID, codec_id_str)?;
 
         // Audio parameters
         if let StreamParams::Audio(params) = &stream.params {
@@ -278,39 +242,46 @@ impl<W: Write + Seek> WebmMuxer<W> {
             if stream.codec == "opus" {
                 // CodecPrivate (OpusHead)
                 let opus_head = self.create_opus_head(params);
-                write_binary_element(&mut self.writer, element_id::CODEC_PRIVATE, &opus_head)?;
-                self.position += 2 + 1 + opus_head.len() as u64;
+                write_binary_element(&mut entry_buffer, element_id::CODEC_PRIVATE, &opus_head)?;
 
                 // CodecDelay: 6.5ms for Opus (3120000 ns at 48kHz)
-                write_uint_element(&mut self.writer, element_id::CODEC_DELAY, 6500000)?;
-                self.position += 7;
+                write_uint_element(&mut entry_buffer, element_id::CODEC_DELAY, 6500000)?;
 
                 // SeekPreRoll: 80ms for Opus (80000000 ns)
-                write_uint_element(&mut self.writer, element_id::SEEK_PRE_ROLL, 80000000)?;
-                self.position += 7;
+                write_uint_element(&mut entry_buffer, element_id::SEEK_PRE_ROLL, 80000000)?;
             }
 
-            // Audio element
-            let audio_size = self.calculate_audio_size(params);
-            write_master_header(&mut self.writer, element_id::AUDIO, audio_size)?;
-            self.position += 2;
+            // Audio element - write to temp buffer first
+            let mut audio_buffer = std::io::Cursor::new(Vec::new());
 
             // Sampling Frequency
             write_float_element(
-                &mut self.writer,
+                &mut audio_buffer,
                 element_id::SAMPLING_FREQUENCY,
                 params.sample_rate as f64,
             )?;
-            self.position += 10;
 
             // Channels
             write_uint_element(
-                &mut self.writer,
+                &mut audio_buffer,
                 element_id::CHANNELS,
                 params.channels as u64,
             )?;
-            self.position += 3;
+
+            let audio_data = audio_buffer.into_inner();
+            let audio_size = audio_data.len() as u64;
+
+            // Write Audio master element with actual size
+            write_master_header(&mut entry_buffer, element_id::AUDIO, audio_size)?;
+            entry_buffer.write_all(&audio_data)?;
         }
+
+        // Now write TrackEntry with actual measured size
+        let entry_data = entry_buffer.into_inner();
+        let entry_size = entry_data.len() as u64;
+
+        write_master_header(writer, element_id::TRACK_ENTRY, entry_size)?;
+        writer.write_all(&entry_data)?;
 
         Ok(())
     }
@@ -322,14 +293,18 @@ impl<W: Write + Seek> WebmMuxer<W> {
             self.finalize_cluster()?;
         }
 
+        // Get actual position before writing
+        self.cluster_start_position = self.writer.stream_position()?;
+        self.position = self.cluster_start_position;
+
         // Write Cluster header (unknown size for streaming)
-        self.cluster_start_position = self.position;
         write_master_header_unknown_size(&mut self.writer, element_id::CLUSTER)?;
-        self.position += 4 + 8;
 
         // Write Cluster Timecode
         write_uint_element(&mut self.writer, element_id::TIMECODE, timecode as u64)?;
-        self.position += 1 + 1 + 4;
+
+        // Update position to actual stream position
+        self.position = self.writer.stream_position()?;
 
         self.cluster_timecode = timecode;
         self.cluster_packet_count = 0;
@@ -343,39 +318,17 @@ impl<W: Write + Seek> WebmMuxer<W> {
             return Ok(());
         }
 
-        // Calculate cluster size
-        let cluster_size = self.position - self.cluster_start_position - 12; // Subtract header
+        // Calculate cluster size (content only, excluding ID and size field)
+        let cluster_size = self.position - self.cluster_start_position - 12; // Subtract ID (4) + size field (8)
 
-        // Seek back to update cluster size
+        // Seek back to update cluster size (right after the 4-byte Cluster ID)
         self.writer
             .seek(SeekFrom::Start(self.cluster_start_position + 4))?;
 
-        // Write actual size (we'll use a 4-byte VINT for cluster sizes)
-        let size_bytes = if cluster_size < 0x1FFFFF {
-            // 3-byte VINT
-            vec![
-                0x20 | ((cluster_size >> 16) as u8),
-                ((cluster_size >> 8) & 0xFF) as u8,
-                (cluster_size & 0xFF) as u8,
-            ]
-        } else if cluster_size < 0x0FFFFFFF {
-            // 4-byte VINT
-            vec![
-                0x10 | ((cluster_size >> 24) as u8),
-                ((cluster_size >> 16) & 0xFF) as u8,
-                ((cluster_size >> 8) & 0xFF) as u8,
-                (cluster_size & 0xFF) as u8,
-            ]
-        } else {
-            return Err(Error::InvalidData(
-                "Cluster size too large".to_string(),
-            ));
-        };
-
-        // Pad to 8 bytes if needed
-        self.writer.write_all(&size_bytes)?;
-        for _ in size_bytes.len()..8 {
-            self.writer.write_u8(0xFF)?;
+        // Write cluster size as proper 8-byte VINT (0x01 prefix + 7 bytes of size)
+        self.writer.write_u8(0x01)?; // 8-byte VINT marker
+        for i in (0..7).rev() {
+            self.writer.write_u8(((cluster_size >> (i * 8)) & 0xFF) as u8)?;
         }
 
         // Seek back to end
@@ -411,24 +364,22 @@ impl<W: Write + Seek> WebmMuxer<W> {
 
         // Write SimpleBlock element
         write_master_header(&mut self.writer, element_id::SIMPLE_BLOCK, block_data_size as u64)?;
-        self.position += 1 + 1;
 
         // Track number (1-byte VINT for track 1-127)
         self.writer.write_u8(0x80 | track_number)?;
-        self.position += 1;
 
         // Relative timecode (big-endian signed 16-bit)
         self.writer
             .write_all(&relative_timecode.to_be_bytes())?;
-        self.position += 2;
 
         // Flags
         self.writer.write_u8(flags)?;
-        self.position += 1;
 
         // Frame data
         self.writer.write_all(packet.data())?;
-        self.position += packet.data().len() as u64;
+
+        // Update position to actual stream position
+        self.position = self.writer.stream_position()?;
 
         self.cluster_packet_count += 1;
 
