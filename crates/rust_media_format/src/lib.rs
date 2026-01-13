@@ -2,7 +2,7 @@
 //!
 //! This crate provides implementations of container format demuxers and muxers:
 //! - **WAV** (RIFF WAVE) - ✅ Demuxer + Muxer
-//! - **WebM** (Matroska subset) - ✅ Demuxer (Muxer planned)
+//! - **WebM** (Matroska subset) - ✅ Demuxer + Muxer
 //! - MP4/MOV (ISO Base Media File Format) - Planned
 //! - MKV (Matroska) - Planned
 //!
@@ -17,7 +17,7 @@ pub mod webm;
 
 // Re-export commonly used demuxers and muxers
 pub use wav::{WavDemuxer, WavMuxer};
-pub use webm::WebmDemuxer;
+pub use webm::{WebmDemuxer, WebmMuxer};
 
 #[cfg(test)]
 mod tests {

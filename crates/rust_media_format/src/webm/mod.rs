@@ -6,5 +6,8 @@
 
 pub mod demuxer;
 pub mod ebml;
+pub mod muxer;
+pub mod writer;
 
 pub use demuxer::WebmDemuxer;
+pub use muxer::WebmMuxer;
