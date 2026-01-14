@@ -49,6 +49,14 @@ pub mod element_id {
     pub const CHANNELS: u64 = 0x9F;
     pub const BIT_DEPTH: u64 = 0x6264;
 
+    // Video
+    pub const VIDEO: u64 = 0xE0;
+    pub const PIXEL_WIDTH: u64 = 0xB0;
+    pub const PIXEL_HEIGHT: u64 = 0xBA;
+    pub const DISPLAY_WIDTH: u64 = 0x54B0;
+    pub const DISPLAY_HEIGHT: u64 = 0x54BA;
+    pub const FRAME_RATE: u64 = 0x2383E3;
+
     // Cluster
     pub const TIMECODE: u64 = 0xE7;
     pub const SIMPLE_BLOCK: u64 = 0xA3;

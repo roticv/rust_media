@@ -5,8 +5,8 @@
 
 use crate::webm::ebml::{element_id, Element};
 use rust_media_core::{
-    AudioStreamParams, ContainerInfo, Demuxer, Error, MediaType, Packet, Result, SampleFormat,
-    StreamInfo, StreamParams,
+    AudioStreamParams, ContainerInfo, Demuxer, Error, MediaType, Packet, PixelFormat, Result,
+    SampleFormat, StreamInfo, StreamParams, VideoStreamParams,
 };
 use std::io::{Read, Seek, SeekFrom};
 
@@ -31,6 +31,7 @@ struct TrackInfo {
     codec_id: String,
     codec_private: Option<Vec<u8>>,
     audio_params: Option<AudioParams>,
+    video_params: Option<VideoParams>,
 }
 
 #[derive(Debug)]
@@ -38,6 +39,15 @@ struct AudioParams {
     sampling_frequency: f64,
     channels: u64,
     bit_depth: Option<u64>,
+}
+
+#[derive(Debug)]
+struct VideoParams {
+    pixel_width: u64,
+    pixel_height: u64,
+    display_width: Option<u64>,
+    display_height: Option<u64>,
+    frame_rate: Option<f64>,
 }
 
 impl<R: Read + Seek> WebmDemuxer<R> {
@@ -172,6 +182,7 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         let mut codec_id = None;
         let mut codec_private = None;
         let mut audio_params = None;
+        let mut video_params = None;
 
         while self.reader.stream_position()? < end_pos {
             let elem = Element::read(&mut self.reader)?;
@@ -192,6 +203,9 @@ impl<R: Read + Seek> WebmDemuxer<R> {
                 element_id::AUDIO => {
                     audio_params = Some(self.parse_audio(&elem)?);
                 }
+                element_id::VIDEO => {
+                    video_params = Some(self.parse_video(&elem)?);
+                }
                 _ => {
                     elem.skip(&mut self.reader)?;
                 }
@@ -207,6 +221,7 @@ impl<R: Read + Seek> WebmDemuxer<R> {
                 codec_id,
                 codec_private,
                 audio_params,
+                video_params,
             }))
         } else {
             Ok(None)
@@ -243,6 +258,55 @@ impl<R: Read + Seek> WebmDemuxer<R> {
             sampling_frequency,
             channels,
             bit_depth,
+        })
+    }
+
+    fn parse_video(&mut self, parent: &Element) -> Result<VideoParams> {
+        let end_pos = self.reader.stream_position()? + parent.size.unwrap_or(0);
+
+        let mut pixel_width = 0;
+        let mut pixel_height = 0;
+        let mut display_width = None;
+        let mut display_height = None;
+        let mut frame_rate = None;
+
+        while self.reader.stream_position()? < end_pos {
+            let elem = Element::read(&mut self.reader)?;
+
+            match elem.id {
+                element_id::PIXEL_WIDTH => {
+                    pixel_width = elem.read_uint(&mut self.reader)?;
+                }
+                element_id::PIXEL_HEIGHT => {
+                    pixel_height = elem.read_uint(&mut self.reader)?;
+                }
+                element_id::DISPLAY_WIDTH => {
+                    display_width = Some(elem.read_uint(&mut self.reader)?);
+                }
+                element_id::DISPLAY_HEIGHT => {
+                    display_height = Some(elem.read_uint(&mut self.reader)?);
+                }
+                element_id::FRAME_RATE => {
+                    frame_rate = Some(elem.read_float(&mut self.reader)?);
+                }
+                _ => {
+                    elem.skip(&mut self.reader)?;
+                }
+            }
+        }
+
+        if pixel_width == 0 || pixel_height == 0 {
+            return Err(Error::InvalidData(
+                "Video track missing width or height".to_string(),
+            ));
+        }
+
+        Ok(VideoParams {
+            pixel_width,
+            pixel_height,
+            display_width,
+            display_height,
+            frame_rate,
         })
     }
 
@@ -286,6 +350,23 @@ impl<R: Read + Seek> WebmDemuxer<R> {
             );
 
             stream_info = stream_info.with_params(StreamParams::Audio(audio_params));
+        }
+
+        // Add video parameters
+        if let Some(ref video) = track.video_params {
+            // VP8/VP9 use YUV420P pixel format
+            let pixel_format = match codec {
+                "vp8" | "vp9" | "av1" => PixelFormat::YUV420P,
+                _ => PixelFormat::YUV420P, // Default
+            };
+
+            let video_params = VideoStreamParams::new(
+                video.pixel_width as usize,
+                video.pixel_height as usize,
+                pixel_format,
+            );
+
+            stream_info = stream_info.with_params(StreamParams::Video(video_params));
         }
 
         Ok(stream_info)
@@ -409,7 +490,12 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         // Find which stream this belongs to
         let stream_index = self.find_stream_index(track_number)?;
 
-        let packet = Packet::new(block_data, stream_index, MediaType::Audio)
+        // Get the correct media type from the stream
+        let media_type = self.streams.get(stream_index)
+            .map(|s| s.media_type)
+            .unwrap_or(MediaType::Unknown);
+
+        let packet = Packet::new(block_data, stream_index, media_type)
             .with_pts(pts);
 
         Ok(packet)
@@ -463,7 +549,12 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         // Find stream index
         let stream_index = self.find_stream_index(track_number)?;
 
-        let mut packet = Packet::new(block_data, stream_index, MediaType::Audio)
+        // Get the correct media type from the stream
+        let media_type = self.streams.get(stream_index)
+            .map(|s| s.media_type)
+            .unwrap_or(MediaType::Unknown);
+
+        let mut packet = Packet::new(block_data, stream_index, media_type)
             .with_pts(pts);
 
         if let Some(dur) = duration {
