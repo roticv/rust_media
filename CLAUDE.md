@@ -28,7 +28,7 @@ rust_media/
 │   │   └── WebM demuxer/muxer
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: H.264, VP9, AV1 (planned)
+│   │   ├── Video: VP8 ✅, H.264 (planned), VP9 (planned), AV1 (planned)
 │   │   └── Audio: PCM ✅, Opus ✅, AAC (planned)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)
@@ -139,14 +139,15 @@ Both structures support:
 
 **Critical**: Maintain a clear separation between container formats and codecs:
 
-- **Container Formats** (handled by demuxers/muxers): MP4, MOV, MKV, WebM
+- **Container Formats** (handled by demuxers/muxers): MP4, MOV, MKV, WebM, WAV
   - Containers wrap compressed media streams and provide metadata, timing, and stream multiplexing
   - A demuxer reads a container and produces Packets
   - A muxer takes Packets and writes a container
+  - Example: WebM container can hold VP8, VP9, or AV1 video streams with Opus or Vorbis audio
 
 - **Codecs** (handled by decoders/encoders):
-  - **Video codecs**: H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, MPEG-2
-  - **Audio codecs**: AAC (LC, HE, HEv2), Opus, MP3, Vorbis, FLAC
+  - **Video codecs**: VP8 ✅, H.264, H.265/HEVC, VP9, AV1, MPEG-4, MPEG-2
+  - **Audio codecs**: PCM ✅, Opus ✅, AAC (LC, HE, HEv2), MP3, Vorbis, FLAC
   - **Image codecs**: JPEG, PNG, HEIC, AVIF
   - A decoder takes Packets and produces Frames
   - An encoder takes Frames and produces Packets
@@ -173,12 +174,21 @@ Build comprehensive testing infrastructure including:
 **Status**: Workspace structure created with `rust_media_format` and `rust_media_codec` crates. Implementations needed.
 
 **Container Formats** (demuxers/muxers):
-- ✅ **WAV** (RIFF WAVE): PCM audio demuxer **IMPLEMENTED** in `rust_media_format/src/wav/demuxer.rs`
+- ✅ **WAV** (RIFF WAVE): PCM audio demuxer/muxer **IMPLEMENTED** in `rust_media_format/src/wav/`
+- ✅ **WebM** (Matroska subset): VP8/VP9/Opus demuxer/muxer **IMPLEMENTED** in `rust_media_format/src/webm/`
+  - Supports VP8, VP9, and Opus codecs
+  - Streaming API with incremental packet processing
+  - Efficient: ~50% less overhead than FFmpeg output (363 bytes vs 711 bytes)
+  - See `examples/webm_remux.rs` for usage
 - MP4, MOV (ISO Base Media File Format)
 - MKV (Matroska)
-- WebM (Matroska subset)
 
 **Video Codecs** (decoders/encoders) - Priority:
+- ✅ **VP8**: Google's open video codec **IMPLEMENTED** in `rust_media_codec/src/video/vp8.rs`
+  - Uses libvpx via vpx-rs bindings (version 0.2.1)
+  - Decoder: Fully functional with YUV420P (I420) output
+  - Encoder: Functional with limited configuration options (see limitations below)
+  - See `examples/test_vp8_codec.rs` for decode/encode roundtrip example
 - H.264/AVC
 - VP9
 - AV1
@@ -198,7 +208,6 @@ Build comprehensive testing infrastructure including:
 
 **Possible Future Codec Support** (depending on requirements):
 - **H.265/HEVC**: Modern successor to H.264, better compression but more complex
-- **VP8**: Predecessor to VP9, also used in WebP image format
 - **MP3**: Legacy audio codec
 - **Vorbis**: Open audio codec (used in WebM)
 - **FLAC**: Lossless audio codec
@@ -252,9 +261,12 @@ Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing
 - Packet and Frame should be zero-copy where possible
 
 - **Container format handling (demuxers/muxers) must be separate from codec implementation (decoders/encoders)**
-  - Example: MP4 is a container, H.264 is a codec. An MP4 file can contain H.264, H.265, or other video codecs
-  - The demuxer reads the MP4 container and extracts H.264 packets
-  - The decoder then decodes the H.264 packets into raw frames
+  - Example 1: MP4 is a container, H.264 is a codec. An MP4 file can contain H.264, H.265, or other video codecs
+    - The demuxer reads the MP4 container and extracts H.264 packets
+    - The decoder then decodes the H.264 packets into raw frames
+  - Example 2: WebM is a container, VP8/VP9 are codecs. A WebM file can contain VP8 or VP9 video with Opus/Vorbis audio
+    - The WebM demuxer reads the container and extracts VP8 packets
+    - The VP8 decoder converts compressed packets into YUV420P frames
 
 - **Streaming Pipeline Architecture**:
   ```
@@ -275,6 +287,54 @@ Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing
   - Excellent for low-latency VoIP, streaming, and music
   - Provides compression ratios of ~10x with good quality
   - See `examples/opus_example.rs` for usage demonstration
+
+- **VP8 codec is implemented** for video encoding and decoding:
+  - Uses libvpx via the vpx-rs crate (version 0.2.1)
+  - Decoder: Fully functional with complete libvpx feature support
+  - Encoder: Functional but with limited configuration options
+  - See `examples/test_vp8_codec.rs` for usage demonstration
+
+### VP8 Encoder Current Limitations
+
+The VP8 encoder currently has hardcoded values for many settings that should be configurable:
+
+**Settings extracted from StreamInfo** (configurable):
+- Codec identifier (must be "vp8")
+- Video dimensions (width × height)
+- Bitrate (default: 1 Mbps if not specified)
+- Timebase (numerator/denominator)
+
+**Hardcoded settings** (not yet configurable):
+- **Rate Control**: Hardcoded to Variable Bitrate (VBR)
+  - Should support: Constant Bitrate (CBR), Constant Quality (CQ), Quantizer (Q) modes
+- **Encoding Deadline**: Hardcoded to `GoodQuality` (balanced speed/quality)
+  - Should support: `BestQuality` (slowest), `Realtime` (fastest)
+- **GOP Size**: Uses libvpx default (automatic keyframe placement)
+  - Should expose: GOP size configuration for predictable keyframe intervals
+- **Keyframe Interval**: Uses libvpx default (~128-256 frames)
+  - Should expose: Max keyframe distance control
+- **Quality Range**: Uses libvpx defaults (min_q=4, max_q=63)
+  - Should expose: Min/max quantizer control for quality tuning
+- **Frame Duration**: Hardcoded to 1 timebase unit
+  - Should derive: From frame rate automatically
+- **Frame Flags**: Cannot force keyframes on specific frames
+  - Should support: `FORCE_KEYFRAME` for scene changes, seek points
+- **Threading**: Uses libvpx auto-detection
+  - Should expose: Thread count configuration
+- **Error Resilience**: Not configured
+  - Should expose: Partition count for error resilience
+
+**Future Enhancement Plan**:
+
+Three approaches are documented in `rust_media_codec/src/video/vp8.rs`:
+
+1. **Option 1: Extend StreamInfo** - Add generic key-value encoder config to StreamInfo
+2. **Option 2: Codec-Specific Config Struct** (recommended) - Create `Vp8EncoderConfig` with all settings
+3. **Option 3: Builder Pattern** (recommended) - `Vp8Encoder::builder().rate_control(...).gop_size(...).build()`
+
+Options 2 and 3 are preferred for type-safety, clear documentation, and codec-specific feature support without polluting the generic StreamInfo structure.
+
+See detailed documentation in `crates/rust_media_codec/src/video/vp8.rs` for comprehensive information about available vpx-rs settings not yet exposed and implementation details.
 
 - Filter graph should support both programmatic and CLI-based construction
 

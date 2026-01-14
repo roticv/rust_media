@@ -1,6 +1,105 @@
 //! VP8 video codec implementation using libvpx
 //!
 //! Provides VP8 encoding and decoding via vpx-rs bindings to libvpx.
+//!
+//! # Current Implementation Status
+//!
+//! ## Decoder
+//! - ✅ Fully implemented with YUV420P (I420) output
+//! - ✅ Supports all VP8 features through libvpx
+//!
+//! ## Encoder
+//! - ✅ Basic encoding with YUV420P (I420) input
+//! - ⚠️  Limited configuration options (see limitations below)
+//!
+//! # Current Encoder Limitations
+//!
+//! The encoder currently has hardcoded values for many settings that should be configurable:
+//!
+//! ## Hardcoded Settings in `send_frame()` (vp8.rs:314-319)
+//! - **Encoding Deadline**: `EncodingDeadline::default()` - No control over speed/quality tradeoff
+//! - **Frame Flags**: `EncoderFrameFlags::empty()` - Cannot force keyframes or set frame-specific flags
+//! - **Frame Duration**: Hardcoded to `1` - Should derive from frame rate
+//!
+//! ## Limited Configuration in `new()` (vp8.rs:213-231)
+//! - **Rate Control**: Hardcoded to `RateControl::VariableBitRate` - No CBR, CQ, or Q mode support
+//! - **GOP Size**: Not configurable - libvpx uses defaults (auto keyframe placement)
+//! - **Keyframe Interval**: Not set - No control over max keyframe distance
+//! - **Quality Settings**: Not exposed - No min/max quantizer control
+//! - **CPU Usage**: Not configurable - No deadline/speed preset control
+//! - **Threading**: Not set - No control over encoder threads
+//! - **Error Resilience**: Not configured - No partition count control
+//! - **Temporal Layers**: Not supported - No SVC configuration
+//!
+//! # Available vpx-rs Settings Not Yet Exposed
+//!
+//! The `EncoderConfig` and `VpxEncoder` support additional settings:
+//!
+//! ```rust,ignore
+//! // Rate control modes
+//! RateControl::VariableBitRate(kbps)  // ✅ Currently used
+//! RateControl::ConstantBitRate(kbps)  // ❌ Not exposed
+//! RateControl::ConstantQuality(q)     // ❌ Not exposed
+//! RateControl::Quantizer(q)           // ❌ Not exposed
+//!
+//! // Encoding deadlines (speed vs quality)
+//! EncodingDeadline::BestQuality       // ❌ Not exposed
+//! EncodingDeadline::Realtime          // ❌ Not exposed
+//! EncodingDeadline::GoodQuality       // ❌ Not exposed (default)
+//!
+//! // Frame flags
+//! EncoderFrameFlags::FORCE_KEYFRAME   // ❌ Not exposed
+//! EncoderFrameFlags::NO_REFERENCE     // ❌ Not exposed
+//! ```
+//!
+//! # Future Enhancement Plan
+//!
+//! To expose these settings, we need to extend the configuration system:
+//!
+//! ## Option 1: Extend StreamInfo
+//! Add codec-specific configuration to `StreamInfo`:
+//! ```rust,ignore
+//! pub struct StreamInfo {
+//!     // ... existing fields ...
+//!     pub encoder_config: Option<HashMap<String, String>>, // Generic key-value config
+//! }
+//! ```
+//!
+//! ## Option 2: Codec-Specific Config Struct
+//! Create a VP8-specific configuration:
+//! ```rust,ignore
+//! pub struct Vp8EncoderConfig {
+//!     pub rate_control: Vp8RateControl,
+//!     pub gop_size: Option<u32>,
+//!     pub keyframe_interval: Option<u32>,
+//!     pub encoding_deadline: Vp8EncodingDeadline,
+//!     pub min_quantizer: Option<u32>,
+//!     pub max_quantizer: Option<u32>,
+//!     pub threads: Option<u32>,
+//!     // ... etc
+//! }
+//!
+//! impl Vp8Encoder {
+//!     pub fn new_with_config(stream_info: StreamInfo, config: Vp8EncoderConfig) -> Result<Self>
+//! }
+//! ```
+//!
+//! ## Option 3: Builder Pattern
+//! ```rust,ignore
+//! Vp8Encoder::builder(stream_info)
+//!     .rate_control(RateControl::ConstantBitRate(2000))
+//!     .gop_size(120)
+//!     .keyframe_interval(30)
+//!     .encoding_deadline(EncodingDeadline::Realtime)
+//!     .build()?
+//! ```
+//!
+//! ## Recommended Approach
+//! Option 2 or 3 is preferred because:
+//! - Type-safe configuration with compile-time validation
+//! - Clear documentation of available options
+//! - Easy to add codec-specific features without polluting StreamInfo
+//! - Can provide sensible defaults per codec
 
 use rust_media_core::{
     Decoder, Encoder, Error, Frame, MediaType, Packet, PixelFormat, Result,
@@ -181,6 +280,50 @@ impl Decoder for Vp8Decoder {
 /// VP8 video encoder
 ///
 /// Encodes raw YUV frames into VP8-compressed video packets.
+///
+/// # Current Configuration
+///
+/// Settings are extracted from `StreamInfo`:
+/// - **Codec**: Must be "vp8"
+/// - **Dimensions**: `VideoStreamParams.width` × `VideoStreamParams.height`
+/// - **Bitrate**: `StreamInfo.bitrate` (default: 1 Mbps)
+/// - **Timebase**: `StreamInfo.time_base` (numerator/denominator)
+///
+/// # Hardcoded Defaults
+///
+/// These settings are currently not configurable:
+/// - **Rate Control**: Variable Bitrate (VBR) only
+/// - **Encoding Deadline**: `GoodQuality` (balanced speed/quality)
+/// - **GOP Size**: Automatic (libvpx default)
+/// - **Keyframe Interval**: Automatic (libvpx default, typically ~128-256 frames)
+/// - **Frame Duration**: 1 timebase unit
+/// - **Quality Range**: libvpx defaults (min_q=4, max_q=63)
+/// - **CPU Usage**: libvpx default (speed=0 for best quality)
+/// - **Threads**: libvpx default (auto-detected)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rust_media_core::{StreamInfo, MediaType, VideoStreamParams, PixelFormat};
+/// use rust_media_codec::Vp8Encoder;
+///
+/// let video_params = VideoStreamParams::new(1920, 1080, PixelFormat::YUV420P);
+/// let stream_info = StreamInfo::new(0, MediaType::Video, "vp8".to_string())
+///     .with_time_base(1, 30)  // 30 fps
+///     .with_bitrate(5_000_000)  // 5 Mbps
+///     .with_params(rust_media_core::StreamParams::Video(video_params));
+///
+/// let encoder = Vp8Encoder::new(stream_info)?;
+///
+/// // Or use the helper for custom bitrate:
+/// let encoder = Vp8Encoder::with_bitrate(stream_info, 8_000_000)?; // 8 Mbps
+/// ```
+///
+/// # See Also
+///
+/// See module-level documentation for detailed information about current limitations
+/// and future enhancement plans for exposing GOP size, rate control modes, and other
+/// encoding parameters.
 pub struct Vp8Encoder {
     stream_info: StreamInfo,
     encoder: VpxEncoder<u8>,
@@ -212,6 +355,12 @@ impl Vp8Encoder {
 
         // Configure rate control (bitrate is in kbit/s for vpx-rs)
         let bitrate_kbps = (stream_info.bitrate.unwrap_or(1_000_000) / 1000) as u32;
+
+        // TODO: Make rate control configurable
+        // Currently hardcoded to VBR. Should support:
+        // - RateControl::ConstantBitRate(kbps)
+        // - RateControl::ConstantQuality(q)
+        // - RateControl::Quantizer(q)
         let rate_control = RateControl::VariableBitRate(bitrate_kbps);
 
         // Set timebase from stream_info
@@ -221,6 +370,13 @@ impl Vp8Encoder {
         };
 
         // Create encoder configuration
+        // TODO: EncoderConfig supports additional settings not yet exposed:
+        // - GOP size / keyframe interval (g, kf_max_dist, kf_min_dist)
+        // - Quality range (rc_min_quantizer, rc_max_quantizer)
+        // - CPU usage / deadline preset
+        // - Thread count (g_threads)
+        // - Error resilience (g_error_resilient, token_partitions)
+        // - Temporal layers (ts_number_layers, ts_target_bitrate, ts_rate_decimator)
         let config = EncoderConfig::<u8>::new(
             EncCodecId::VP8,
             video_params.width as u32,
@@ -308,14 +464,30 @@ impl Encoder for Vp8Encoder {
 
         // Encode the frame
         let timestamp = frame.pts().unwrap_or(self.frame_count);
+
+        // TODO: Make these encoding parameters configurable:
+        //
+        // 1. Duration: Currently hardcoded to 1 timebase unit
+        //    Should derive from frame rate: duration = timebase.den / fps
+        //
+        // 2. EncodingDeadline: Currently using default (GoodQuality)
+        //    Should be configurable to:
+        //    - EncodingDeadline::BestQuality (slowest, best compression)
+        //    - EncodingDeadline::GoodQuality (balanced, default)
+        //    - EncodingDeadline::Realtime (fastest, lower compression)
+        //
+        // 3. EncoderFrameFlags: Currently empty
+        //    Should support:
+        //    - EncoderFrameFlags::FORCE_KEYFRAME (for scene changes, seek points)
+        //    - EncoderFrameFlags::NO_REFERENCE (for temporal layers)
         let packets = self
             .encoder
             .encode(
                 timestamp,
-                1, // duration
+                1, // duration - TODO: derive from frame rate
                 yuv_image,
-                EncodingDeadline::default(),
-                EncoderFrameFlags::empty(),
+                EncodingDeadline::default(), // TODO: make configurable (BestQuality/GoodQuality/Realtime)
+                EncoderFrameFlags::empty(),  // TODO: support FORCE_KEYFRAME and other flags
             )
             .map_err(|e| Error::Encode(format!("VP8 encode failed: {:?}", e)))?;
 
