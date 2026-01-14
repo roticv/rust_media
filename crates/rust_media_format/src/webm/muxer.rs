@@ -1,6 +1,6 @@
 //! WebM file muxer implementation
 //!
-//! WebM muxer for writing Opus audio to WebM containers using EBML/Matroska format.
+//! WebM muxer for writing audio (Opus, Vorbis) and video (VP8, VP9, AV1) to WebM containers using EBML/Matroska format.
 
 use crate::webm::ebml::element_id;
 use crate::webm::writer::{
@@ -15,7 +15,7 @@ use std::io::{Seek, SeekFrom, Write};
 
 /// WebM file muxer
 ///
-/// Writes Opus audio data to WebM files using the streaming Muxer API.
+/// Writes audio (Opus, Vorbis) and video (VP8, VP9, AV1) data to WebM files using the streaming Muxer API.
 pub struct WebmMuxer<W> {
     writer: W,
     streams: Vec<StreamInfo>,
@@ -220,13 +220,28 @@ impl<W: Write + Seek> WebmMuxer<W> {
             (track_idx + 1) as u64,
         )?;
 
-        // Track Type (2 = audio)
-        write_uint_element(&mut entry_buffer, element_id::TRACK_TYPE, 2)?;
+        // Track Type (1 = video, 2 = audio)
+        let track_type = match stream.media_type {
+            MediaType::Video => 1,
+            MediaType::Audio => 2,
+            _ => {
+                return Err(Error::Unsupported(format!(
+                    "WebM muxer does not support media type: {:?}",
+                    stream.media_type
+                )))
+            }
+        };
+        write_uint_element(&mut entry_buffer, element_id::TRACK_TYPE, track_type)?;
 
         // Codec ID
         let codec_id_str = match stream.codec.as_str() {
+            // Audio codecs
             "opus" => "A_OPUS",
             "vorbis" => "A_VORBIS",
+            // Video codecs
+            "vp8" => "V_VP8",
+            "vp9" => "V_VP9",
+            "av1" => "V_AV1",
             _ => {
                 return Err(Error::Unsupported(format!(
                     "WebM muxer does not support codec: {}",
@@ -236,44 +251,72 @@ impl<W: Write + Seek> WebmMuxer<W> {
         };
         write_string_element(&mut entry_buffer, element_id::CODEC_ID, codec_id_str)?;
 
-        // Audio parameters
-        if let StreamParams::Audio(params) = &stream.params {
-            // Opus-specific elements
-            if stream.codec == "opus" {
-                // CodecPrivate (OpusHead)
-                let opus_head = self.create_opus_head(params);
-                write_binary_element(&mut entry_buffer, element_id::CODEC_PRIVATE, &opus_head)?;
+        // Stream-specific parameters
+        match &stream.params {
+            StreamParams::Audio(params) => {
+                // Opus-specific elements
+                if stream.codec == "opus" {
+                    // CodecPrivate (OpusHead)
+                    let opus_head = self.create_opus_head(params);
+                    write_binary_element(&mut entry_buffer, element_id::CODEC_PRIVATE, &opus_head)?;
 
-                // CodecDelay: 6.5ms for Opus (3120000 ns at 48kHz)
-                write_uint_element(&mut entry_buffer, element_id::CODEC_DELAY, 6500000)?;
+                    // CodecDelay: 6.5ms for Opus (3120000 ns at 48kHz)
+                    write_uint_element(&mut entry_buffer, element_id::CODEC_DELAY, 6500000)?;
 
-                // SeekPreRoll: 80ms for Opus (80000000 ns)
-                write_uint_element(&mut entry_buffer, element_id::SEEK_PRE_ROLL, 80000000)?;
+                    // SeekPreRoll: 80ms for Opus (80000000 ns)
+                    write_uint_element(&mut entry_buffer, element_id::SEEK_PRE_ROLL, 80000000)?;
+                }
+
+                // Audio element - write to temp buffer first
+                let mut audio_buffer = std::io::Cursor::new(Vec::new());
+
+                // Sampling Frequency
+                write_float_element(
+                    &mut audio_buffer,
+                    element_id::SAMPLING_FREQUENCY,
+                    params.sample_rate as f64,
+                )?;
+
+                // Channels
+                write_uint_element(
+                    &mut audio_buffer,
+                    element_id::CHANNELS,
+                    params.channels as u64,
+                )?;
+
+                let audio_data = audio_buffer.into_inner();
+                let audio_size = audio_data.len() as u64;
+
+                // Write Audio master element with actual size
+                write_master_header(&mut entry_buffer, element_id::AUDIO, audio_size)?;
+                entry_buffer.write_all(&audio_data)?;
             }
+            StreamParams::Video(params) => {
+                // Video element - write to temp buffer first
+                let mut video_buffer = std::io::Cursor::new(Vec::new());
 
-            // Audio element - write to temp buffer first
-            let mut audio_buffer = std::io::Cursor::new(Vec::new());
+                // Pixel Width
+                write_uint_element(
+                    &mut video_buffer,
+                    element_id::PIXEL_WIDTH,
+                    params.width as u64,
+                )?;
 
-            // Sampling Frequency
-            write_float_element(
-                &mut audio_buffer,
-                element_id::SAMPLING_FREQUENCY,
-                params.sample_rate as f64,
-            )?;
+                // Pixel Height
+                write_uint_element(
+                    &mut video_buffer,
+                    element_id::PIXEL_HEIGHT,
+                    params.height as u64,
+                )?;
 
-            // Channels
-            write_uint_element(
-                &mut audio_buffer,
-                element_id::CHANNELS,
-                params.channels as u64,
-            )?;
+                let video_data = video_buffer.into_inner();
+                let video_size = video_data.len() as u64;
 
-            let audio_data = audio_buffer.into_inner();
-            let audio_size = audio_data.len() as u64;
-
-            // Write Audio master element with actual size
-            write_master_header(&mut entry_buffer, element_id::AUDIO, audio_size)?;
-            entry_buffer.write_all(&audio_data)?;
+                // Write Video master element with actual size
+                write_master_header(&mut entry_buffer, element_id::VIDEO, video_size)?;
+                entry_buffer.write_all(&video_data)?;
+            }
+            _ => {}
         }
 
         // Now write TrackEntry with actual measured size
@@ -395,18 +438,23 @@ impl<W: Write + Seek> Muxer for WebmMuxer<W> {
             ));
         }
 
-        // Validate it's an audio stream
-        if !matches!(stream_info.params, StreamParams::Audio(_)) {
+        // Validate stream has parameters
+        if !matches!(
+            stream_info.params,
+            StreamParams::Audio(_) | StreamParams::Video(_)
+        ) {
             return Err(Error::InvalidData(
-                "WebM muxer currently only supports audio streams".to_string(),
+                "WebM muxer requires audio or video stream parameters".to_string(),
             ));
         }
 
         // Validate codec is supported
-        if stream_info.codec != "opus" && stream_info.codec != "vorbis" {
+        let supported_codecs = ["opus", "vorbis", "vp8", "vp9", "av1"];
+        if !supported_codecs.contains(&stream_info.codec.as_str()) {
             return Err(Error::Unsupported(format!(
-                "WebM muxer only supports Opus and Vorbis codecs, got: {}",
-                stream_info.codec
+                "WebM muxer does not support codec: {}. Supported: {}",
+                stream_info.codec,
+                supported_codecs.join(", ")
             )));
         }
 
@@ -462,10 +510,11 @@ impl<W: Write + Seek> Muxer for WebmMuxer<W> {
         }
 
         // Validate media type
-        if packet.media_type() != MediaType::Audio {
-            return Err(Error::InvalidData(
-                "WebM muxer only supports audio packets".to_string(),
-            ));
+        if packet.media_type() != MediaType::Audio && packet.media_type() != MediaType::Video {
+            return Err(Error::InvalidData(format!(
+                "WebM muxer only supports audio and video packets, got: {:?}",
+                packet.media_type()
+            )));
         }
 
         // Get packet timestamp in milliseconds
