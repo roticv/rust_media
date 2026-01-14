@@ -3,15 +3,15 @@
 //! This crate provides implementations of media codecs:
 //!
 //! # Video Codecs
-//! - H.264/AVC (planned)
+//! - **VP8** - ✅ Implemented (via libvpx)
 //! - VP9 (planned)
+//! - H.264/AVC (planned)
 //! - AV1 (planned)
 //! - H.265/HEVC (future)
-//! - VP8 (future)
 //!
 //! # Audio Codecs
 //! - **PCM** (raw audio) - ✅ Implemented
-//! - **Opus** - ✅ Implemented
+//! - **Opus** - ✅ Implemented (via libopus)
 //! - AAC (LC, HE, HEv2) (planned)
 //! - MP3 (future)
 //! - Vorbis (future)
@@ -20,13 +20,12 @@
 //! All implementations use streaming APIs for bounded memory usage.
 
 pub mod audio;
-
-// Placeholder for video codecs
-// pub mod video;
+pub mod video;
 
 // Re-export commonly used codecs
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
+pub use video::vp8::{Vp8Decoder, Vp8Encoder};
 
 #[cfg(test)]
 mod tests {
