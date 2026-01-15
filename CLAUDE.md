@@ -6,6 +6,70 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rust_media` is an ambitious project to build a Rust equivalent of FFmpeg - a comprehensive media processing framework and CLI tool. The project emphasizes clean architecture, performance, and modern codec support.
 
+## Licensing Strategy
+
+The project is **MIT licensed** by default, prioritizing permissively-licensed codecs. However, certain industry-standard codecs require GPL libraries, which we support through **optional Cargo features**.
+
+### Default (MIT License)
+
+All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
+- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 (libvpx/BSD-3-Clause), AV1 (dav1d, rav1e/BSD-MIT)
+- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), Vorbis (libvorbis/BSD), FLAC (libflac/BSD)
+
+### Optional GPL Features
+
+Industry-standard codecs that require GPL libraries are available through opt-in Cargo features:
+
+```toml
+[features]
+default = []
+gpl-x264 = ["x264"]  # Enables H.264 encoding via x264 (GPL v2+)
+# Future: gpl-x265, gpl-xvid, etc.
+
+[dependencies]
+x264 = { version = "...", optional = true }
+```
+
+**IMPORTANT**: When GPL features are enabled:
+- The compiled binary becomes **GPL-licensed** (copyleft applies)
+- Users must comply with GPL requirements for distribution
+- Clearly document in README and build output which features change the license
+
+### Codec Licensing Reference
+
+| Codec | Library | License | Feature Flag | Status |
+|-------|---------|---------|--------------|--------|
+| VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
+| VP9 | libvpx | BSD-3-Clause | *(default)* | Planned |
+| AV1 | dav1d/rav1e | BSD/MIT | *(default)* | Planned |
+| H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | Planned |
+| H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | Planned |
+| H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
+| Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
+| PCM | *(native)* | N/A | *(default)* | ✅ Implemented |
+
+### Why This Approach?
+
+1. **User Choice**: Users decide their licensing requirements
+2. **Industry Standard**: x264 is the gold standard for H.264 encoding quality
+3. **Clear Separation**: Default build stays MIT, optional features are clearly marked GPL
+4. **Legal Compliance**: No hidden GPL dependencies in default build
+
+### Documentation Requirements
+
+When implementing GPL-licensed codecs:
+
+1. **Feature flag naming**: Use `gpl-` prefix (e.g., `gpl-x264`, `gpl-x265`)
+2. **README.md**: Document which features change the license
+3. **Build warnings**: Print license notice when GPL features are enabled
+4. **Crate metadata**: Update `Cargo.toml` license field when GPL features are used
+
+Example build warning:
+```rust
+#[cfg(feature = "gpl-x264")]
+compile_warning!("GPL feature 'gpl-x264' enabled - binary is now GPL v2+ licensed");
+```
+
 ## Workspace Structure
 
 The project uses a **Cargo workspace** with multiple crates for modularity and separation of concerns:
@@ -189,9 +253,16 @@ Build comprehensive testing infrastructure including:
   - Decoder: Fully functional with YUV420P (I420) output
   - Encoder: Functional with limited configuration options (see limitations below)
   - See `examples/test_vp8_codec.rs` for decode/encode roundtrip example
-- H.264/AVC
-- VP9
-- AV1
+- **H.264/AVC** (planned)
+  - **Decoder**: OpenH264 (BSD-2-Clause) - default, MIT-compatible
+  - **Encoder**: x264 (GPL v2+) - optional `gpl-x264` feature
+  - Most widely deployed video codec, industry standard for compatibility
+- **VP9** (planned)
+  - Uses libvpx (BSD-3-Clause) - default, MIT-compatible
+  - Successor to VP8, better compression efficiency
+- **AV1** (planned)
+  - Uses dav1d (decoder) and rav1e (encoder) - BSD/MIT licensed
+  - Modern codec with best compression, royalty-free
 
 **Audio Codecs** (decoders/encoders) - Priority:
 - ✅ **PCM** (Pulse Code Modulation): Raw uncompressed audio - fundamental for all audio processing. **IMPLEMENTED** in `rust_media_codec/src/audio/pcm.rs`
@@ -247,6 +318,10 @@ Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing
 - **Modularity**: Each component (demuxer, decoder, filter, encoder, muxer) should be independently testable
 - **Correctness**: Validate output quality using metrics like SSIM, not just successful execution
 - **Modern Codecs**: Prioritize contemporary formats (AV1, VP9) alongside legacy support (H.264)
+- **Licensing Strategy**: MIT by default, with optional GPL features for industry-standard codecs
+  - Default build uses only permissively-licensed libraries (BSD, MIT, Apache-2.0)
+  - GPL-licensed codecs (x264, x265) available through opt-in Cargo features
+  - Clear documentation of licensing implications for each feature
 
 ## Key Implementation Considerations
 
@@ -339,3 +414,18 @@ See detailed documentation in `crates/rust_media_codec/src/video/vp8.rs` for com
 - Filter graph should support both programmatic and CLI-based construction
 
 - Integration tests should include both correctness (quality metrics) and performance (benchmarks)
+
+- **Implementing GPL-licensed codecs**:
+  - Always use optional Cargo features with `gpl-` prefix (e.g., `gpl-x264`)
+  - Gate GPL dependencies behind feature flags
+  - Document licensing implications clearly in README and rustdoc
+  - Consider adding compile-time warnings when GPL features are enabled
+  - Keep GPL code isolated in separate modules for clarity
+  - Example structure:
+    ```rust
+    #[cfg(feature = "gpl-x264")]
+    pub mod x264;
+
+    #[cfg(feature = "gpl-x264")]
+    pub use x264::{X264Encoder, X264Decoder};
+    ```
