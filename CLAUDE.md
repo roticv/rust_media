@@ -13,7 +13,7 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 ### Default (MIT License)
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
-- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 (libvpx/BSD-3-Clause), AV1 (dav1d, rav1e/BSD-MIT)
+- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), AV1 (dav1d, rav1e/BSD-MIT)
 - **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), Vorbis (libvorbis/BSD), FLAC (libflac/BSD)
 
 ### Optional GPL Features
@@ -40,7 +40,7 @@ x264 = { version = "...", optional = true }
 | Codec | Library | License | Feature Flag | Status |
 |-------|---------|---------|--------------|--------|
 | VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
-| VP9 | libvpx | BSD-3-Clause | *(default)* | Planned |
+| VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | AV1 | dav1d/rav1e | BSD/MIT | *(default)* | Planned |
 | H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | Planned |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | Planned |
@@ -92,7 +92,7 @@ rust_media/
 │   │   └── WebM demuxer/muxer
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, H.264 (planned), VP9 (planned), AV1 (planned)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 (planned), AV1 (planned)
 │   │   └── Audio: PCM ✅, Opus ✅, AAC (planned)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)
@@ -210,7 +210,7 @@ Both structures support:
   - Example: WebM container can hold VP8, VP9, or AV1 video streams with Opus or Vorbis audio
 
 - **Codecs** (handled by decoders/encoders):
-  - **Video codecs**: VP8 ✅, H.264, H.265/HEVC, VP9, AV1, MPEG-4, MPEG-2
+  - **Video codecs**: VP8 ✅, VP9 ✅, H.264, H.265/HEVC, AV1, MPEG-4, MPEG-2
   - **Audio codecs**: PCM ✅, Opus ✅, AAC (LC, HE, HEv2), MP3, Vorbis, FLAC
   - **Image codecs**: JPEG, PNG, HEIC, AVIF
   - A decoder takes Packets and produces Frames
@@ -252,14 +252,19 @@ Build comprehensive testing infrastructure including:
   - Uses libvpx via vpx-rs bindings (version 0.2.1)
   - Decoder: Fully functional with YUV420P (I420) output
   - Encoder: Functional with limited configuration options (see limitations below)
-  - See `examples/test_vp8_codec.rs` for decode/encode roundtrip example
+  - See `crates/rust_media_codec/examples/test_vp8_codec.rs` for decode/encode roundtrip example
 - **H.264/AVC** (planned)
   - **Decoder**: OpenH264 (BSD-2-Clause) - default, MIT-compatible
   - **Encoder**: x264 (GPL v2+) - optional `gpl-x264` feature
   - Most widely deployed video codec, industry standard for compatibility
-- **VP9** (planned)
-  - Uses libvpx (BSD-3-Clause) - default, MIT-compatible
-  - Successor to VP8, better compression efficiency
+- ✅ **VP9**: Google's successor to VP8 **IMPLEMENTED** in `rust_media_codec/src/video/vp9.rs`
+  - Uses libvpx via vpx-rs bindings (version 0.2.1)
+  - Decoder: Fully functional with YUV420P (I420) output, 16-bit support planned
+  - Encoder: Functional with limited configuration options (similar limitations to VP8)
+  - 30-50% better compression than VP8 at same quality
+  - Tile-based encoding for better parallelization
+  - BSD-3-Clause licensed - default, MIT-compatible
+  - See `crates/rust_media_codec/examples/test_vp9_codec.rs` for decode/encode roundtrip example
 - **AV1** (planned)
   - Uses dav1d (decoder) and rav1e (encoder) - BSD/MIT licensed
   - Modern codec with best compression, royalty-free

@@ -11,3 +11,6 @@ description = "Codec implementations for rust_media - H.264, VP9, AV1, AAC, Opus
 rust_media_core = { workspace = true }
 audiopus = "0.3.0-rc.0"
 vpx-rs = "0.2.1"
+
+[dev-dependencies]
+rust_media_format = { workspace = true }

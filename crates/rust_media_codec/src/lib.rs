@@ -4,7 +4,7 @@
 //!
 //! # Video Codecs
 //! - **VP8** - ✅ Implemented (via libvpx)
-//! - VP9 (planned)
+//! - **VP9** - ✅ Implemented (via libvpx)
 //! - H.264/AVC (planned)
 //! - AV1 (planned)
 //! - H.265/HEVC (future)
@@ -26,6 +26,7 @@ pub mod video;
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
 pub use video::vp8::{Vp8Decoder, Vp8Encoder};
+pub use video::vp9::{Vp9Decoder, Vp9Encoder};
 
 #[cfg(test)]
 mod tests {
