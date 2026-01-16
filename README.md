@@ -6,8 +6,8 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
-- **Container format** support (WAV ✅, WebM ✅, MP4 planned, MKV planned)
-- **Codec** support (PCM, Opus implemented; H.264, VP9, AV1, AAC planned)
+- **Container format** support (WAV ✅, WebM ✅, MP4 ✅ muxer, MKV planned)
+- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅; H.264, AV1, AAC planned)
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -75,17 +75,30 @@ This enables:
 
 🚧 **Work in Progress** 🚧
 
-This project is in early development. Current status:
+This project is in active development. Current status:
 
+### Core Infrastructure
 - ✅ Core data structures (Packet, Frame)
 - ✅ Trait definitions (Demuxer, Decoder, Encoder, Muxer)
 - ✅ Workspace structure
-- ✅ **PCM codec** (decoder + encoder)
-- ✅ **Opus codec** (decoder + encoder)
-- ✅ **WAV demuxer** (read PCM from WAV files)
-- ✅ **WebM demuxer** (read Opus audio from WebM files)
-- 🚧 Container format implementations (MP4, MKV muxers, WAV/WebM muxers)
-- 🚧 Codec implementations (H.264, VP9, AV1, AAC)
+
+### Container Formats
+- ✅ **WAV** demuxer + muxer (PCM audio)
+- ✅ **WebM** demuxer + muxer (VP8/VP9 video, Opus audio)
+- ✅ **MP4** muxer (H.264, VP9 video; AAC, Opus audio)
+- 📋 MP4 demuxer - Planned
+- 📋 MKV demuxer/muxer - Planned
+
+### Codecs
+- ✅ **PCM** codec (decoder + encoder)
+- ✅ **Opus** codec (decoder + encoder)
+- ✅ **VP8** codec (decoder + encoder via libvpx)
+- ✅ **VP9** codec (decoder + encoder via libvpx)
+- 📋 H.264 codec - Planned
+- 📋 AV1 codec - Planned
+- 📋 AAC codec - Planned
+
+### Other
 - 📋 Filter system (scale, crop, format conversion, etc.) - Planned
 - 🚧 CLI tool
 

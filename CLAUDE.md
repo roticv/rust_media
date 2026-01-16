@@ -87,9 +87,10 @@ rust_media/
 │   │   └── Error types, stream metadata
 │   │
 │   ├── rust_media_format/  # Container format implementations
-│   │   ├── MP4/MOV demuxer/muxer
-│   │   ├── MKV demuxer/muxer
-│   │   └── WebM demuxer/muxer
+│   │   ├── WAV demuxer/muxer ✅
+│   │   ├── WebM demuxer/muxer ✅
+│   │   ├── MP4 muxer ✅ (demuxer planned)
+│   │   └── MKV demuxer/muxer (planned)
 │   │
 │   ├── rust_media_codec/   # Codec implementations
 │   │   ├── Video: VP8 ✅, VP9 ✅, H.264 (planned), AV1 (planned)
@@ -244,8 +245,14 @@ Build comprehensive testing infrastructure including:
   - Streaming API with incremental packet processing
   - Efficient: ~50% less overhead than FFmpeg output (363 bytes vs 711 bytes)
   - See `examples/webm_remux.rs` for usage
-- MP4, MOV (ISO Base Media File Format)
-- MKV (Matroska)
+- ✅ **MP4** (ISO Base Media File Format): Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
+  - Supports H.264/AVC (avc1), VP9 (vp09), AAC (mp4a), and Opus audio
+  - Streaming API with incremental packet writing
+  - File structure: ftyp | mdat | moov (streaming-friendly)
+  - Complete sample table support: stts, stsc, stsz, stco/co64, stss, ctts
+  - Automatic 64-bit chunk offsets for files > 4GB
+  - Demuxer planned for future implementation
+- MKV (Matroska) - Planned
 
 **Video Codecs** (decoders/encoders) - Priority:
 - ✅ **VP8**: Google's open video codec **IMPLEMENTED** in `rust_media_codec/src/video/vp8.rs`
