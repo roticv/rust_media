@@ -326,8 +326,17 @@ impl TrackData {
             });
         }
 
-        // Update duration
-        self.duration = dts as u64 + delta as u64;
+        // Update duration (handle negative dts from B-frames)
+        if dts >= 0 {
+            self.duration = (dts as u64).saturating_add(delta as u64);
+        } else {
+            // Negative DTS - use delta only if it exceeds the negative offset
+            let abs_dts = dts.unsigned_abs();
+            if delta as u64 > abs_dts {
+                self.duration = (delta as u64) - abs_dts;
+            }
+            // Otherwise duration stays at its current value
+        }
         self.last_dts = Some(dts);
 
         // Handle composition time offset (pts - dts)

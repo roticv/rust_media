@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Container format implementations for rust_media - MP4, MKV, WebM demuxers and muxers"
 
+[features]
+default = []
+# GPL-licensed features for examples and tests
+gpl-x264 = ["rust_media_codec/gpl-x264"]
+
 [dependencies]
 rust_media_core = { workspace = true }
 byteorder = "1.5"
