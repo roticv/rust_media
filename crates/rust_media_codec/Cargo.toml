@@ -7,10 +7,17 @@ license.workspace = true
 repository.workspace = true
 description = "Codec implementations for rust_media - H.264, VP9, AV1, AAC, Opus decoders and encoders"
 
+[features]
+default = []
+# GPL-licensed features - enabling these changes the license of compiled binaries
+gpl-x264 = ["x264"]
+
 [dependencies]
 rust_media_core = { workspace = true }
 audiopus = "0.3.0-rc.0"
 vpx-rs = "0.2.1"
+# GPL v2+ licensed - only included when gpl-x264 feature is enabled
+x264 = { version = "0.5", optional = true }
 
 [dev-dependencies]
 rust_media_format = { workspace = true }

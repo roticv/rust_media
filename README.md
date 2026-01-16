@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MP4 ✅ muxer, MKV planned)
-- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅; H.264, AV1, AAC planned)
+- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅, H.264 ✅ encoder; AV1, AAC planned)
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -94,7 +94,8 @@ This project is in active development. Current status:
 - ✅ **Opus** codec (decoder + encoder)
 - ✅ **VP8** codec (decoder + encoder via libvpx)
 - ✅ **VP9** codec (decoder + encoder via libvpx)
-- 📋 H.264 codec - Planned
+- ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
+- 📋 H.264 decoder - Planned
 - 📋 AV1 codec - Planned
 - 📋 AAC codec - Planned
 
@@ -102,10 +103,30 @@ This project is in active development. Current status:
 - 📋 Filter system (scale, crop, format conversion, etc.) - Planned
 - 🚧 CLI tool
 
+## GPL-Licensed Features
+
+Some codecs require GPL-licensed libraries and are available through optional Cargo features:
+
+| Feature | Codec | Library | License |
+|---------|-------|---------|---------|
+| `gpl-x264` | H.264 encoder | x264 | GPL v2+ |
+
+**Warning**: Enabling GPL features changes the license of compiled binaries to GPL.
+
+```bash
+# Build with H.264 encoder support (GPL)
+cargo build --features gpl-x264
+
+# Build without GPL features (MIT/Apache-2.0)
+cargo build
+```
+
 ## Contributing
 
 See [CLAUDE.md](CLAUDE.md) for detailed architectural guidance.
 
 ## License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0 (default build)
+
+When GPL features are enabled (e.g., `gpl-x264`), the compiled binary is licensed under GPL v2+.
