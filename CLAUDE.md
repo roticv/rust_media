@@ -46,6 +46,7 @@ x264 = { version = "...", optional = true }
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
 | H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
+| AAC (encode) | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
 | PCM | *(native)* | N/A | *(default)* | ✅ Implemented |
 
 ### Why This Approach?
@@ -94,7 +95,7 @@ rust_media/
 │   │
 │   ├── rust_media_codec/   # Codec implementations
 │   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (encoder, gpl-x264), AV1 (planned)
-│   │   └── Audio: PCM ✅, Opus ✅, AAC (planned)
+│   │   └── Audio: PCM ✅, Opus ✅, AAC ✅ (encoder, fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)
 │   │   ├── Video: scale, crop, overlay, rotate
@@ -212,7 +213,7 @@ Both structures support:
 
 - **Codecs** (handled by decoders/encoders):
   - **Video codecs**: VP8 ✅, VP9 ✅, H.264 ✅ (encoder), H.265/HEVC, AV1, MPEG-4, MPEG-2
-  - **Audio codecs**: PCM ✅, Opus ✅, AAC (LC, HE, HEv2), MP3, Vorbis, FLAC
+  - **Audio codecs**: PCM ✅, Opus ✅, AAC ✅ (encoder), MP3, Vorbis, FLAC
   - **Image codecs**: JPEG, PNG, HEIC, AVIF
   - A decoder takes Packets and produces Frames
   - An encoder takes Frames and produces Packets
@@ -287,7 +288,11 @@ Build comprehensive testing infrastructure including:
 - ✅ **Opus**: Lossy codec for speech and music, optimized for low-latency transmission. **IMPLEMENTED** in `rust_media_codec/src/audio/opus.rs`
   - Requires: libopus (install via `brew install opus` on macOS, `apt-get install libopus-dev` on Linux)
   - Supports: 8, 12, 16, 24, 48 kHz sample rates, mono and stereo
-- AAC: LC, HE (AAC+), HEv2 (AAC++ / eAAC+)
+- ✅ **AAC** (encoder): AAC-LC encoding via libfdk-aac. **IMPLEMENTED** in `rust_media_codec/src/audio/fdk_aac.rs`
+  - Requires: libfdk-aac (install via `brew install fdk-aac` on macOS, `apt-get install libfdk-aac-dev` on Linux)
+  - Requires feature flag: `fdk-aac`
+  - Supports: 8-96 kHz sample rates, mono and stereo
+  - License: Fraunhofer FDK AAC License (not GPL, but has some restrictions)
 
 **Image Codecs** (for thumbnails, still images) - Priority:
 - JPEG

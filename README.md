@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MP4 ✅ muxer, MKV planned)
-- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅, H.264 ✅ encoder; AV1, AAC planned)
+- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅, H.264 ✅ encoder, AAC ✅ encoder; AV1 planned)
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -95,29 +95,39 @@ This project is in active development. Current status:
 - ✅ **VP8** codec (decoder + encoder via libvpx)
 - ✅ **VP9** codec (decoder + encoder via libvpx)
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
+- ✅ **AAC** encoder (via libfdk-aac, requires `fdk-aac` feature)
 - 📋 H.264 decoder - Planned
 - 📋 AV1 codec - Planned
-- 📋 AAC codec - Planned
+- 📋 AAC decoder - Planned
 
 ### Other
 - 📋 Filter system (scale, crop, format conversion, etc.) - Planned
 - 🚧 CLI tool
 
-## GPL-Licensed Features
+## Optional Features
 
-Some codecs require GPL-licensed libraries and are available through optional Cargo features:
+Some codecs require external libraries with specific licensing and are available through optional Cargo features:
 
 | Feature | Codec | Library | License |
 |---------|-------|---------|---------|
 | `gpl-x264` | H.264 encoder | x264 | GPL v2+ |
+| `fdk-aac` | AAC encoder | libfdk-aac | Fraunhofer FDK AAC License |
 
-**Warning**: Enabling GPL features changes the license of compiled binaries to GPL.
+**Warning**: Enabling `gpl-x264` changes the license of compiled binaries to GPL.
+
+**Note**: The `fdk-aac` feature uses the Fraunhofer FDK AAC License, which is more permissive than GPL but has some restrictions on use.
 
 ```bash
 # Build with H.264 encoder support (GPL)
 cargo build --features gpl-x264
 
-# Build without GPL features (MIT/Apache-2.0)
+# Build with AAC encoder support
+cargo build --features fdk-aac
+
+# Build with both video and audio encoding
+cargo build --features "gpl-x264 fdk-aac"
+
+# Build without optional features (MIT/Apache-2.0)
 cargo build
 ```
 
