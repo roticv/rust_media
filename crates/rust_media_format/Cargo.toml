@@ -11,6 +11,8 @@ description = "Container format implementations for rust_media - MP4, MKV, WebM 
 default = []
 # GPL-licensed features for examples and tests
 gpl-x264 = ["rust_media_codec/gpl-x264"]
+# FDK-AAC feature for AAC encoding
+fdk-aac = ["rust_media_codec/fdk-aac"]
 
 [dependencies]
 rust_media_core = { workspace = true }

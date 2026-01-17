@@ -12,20 +12,21 @@
 //! # Audio Codecs
 //! - **PCM** (raw audio) - ✅ Implemented
 //! - **Opus** - ✅ Implemented (via libopus)
-//! - AAC (LC, HE, HEv2) (planned)
+//! - **AAC** - ✅ Encoder implemented (via libfdk-aac, requires `fdk-aac` feature)
 //! - MP3 (future)
 //! - Vorbis (future)
 //! - FLAC (future)
 //!
 //! All implementations use streaming APIs for bounded memory usage.
 //!
-//! # GPL-Licensed Features
+//! # Optional Features
 //!
-//! Some codecs require GPL-licensed libraries and are gated behind optional features:
+//! Some codecs require external libraries and are gated behind optional features:
 //!
 //! - `gpl-x264`: Enables H.264 encoding via x264 (GPL v2+)
+//! - `fdk-aac`: Enables AAC encoding via libfdk-aac (Fraunhofer FDK AAC License)
 //!
-//! **Warning**: Enabling GPL features changes the license of compiled binaries to GPL.
+//! **Warning**: Enabling `gpl-x264` changes the license of compiled binaries to GPL.
 
 pub mod audio;
 pub mod video;
@@ -36,9 +37,12 @@ pub use audio::pcm::{PcmDecoder, PcmEncoder};
 pub use video::vp8::{Vp8Decoder, Vp8Encoder};
 pub use video::vp9::{Vp9Decoder, Vp9Encoder};
 
-// GPL-licensed codecs (optional features)
+// Optional feature codecs
 #[cfg(feature = "gpl-x264")]
 pub use video::x264::X264Encoder;
+
+#[cfg(feature = "fdk-aac")]
+pub use audio::fdk_aac::FdkAacEncoder;
 
 #[cfg(test)]
 mod tests {
