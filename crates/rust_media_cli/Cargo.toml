@@ -13,3 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 rust_media = { path = "../rust_media" }
+rust_media_format = { path = "../rust_media_format" }
+rust_media_codec = { path = "../rust_media_codec" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = []
+fdk-aac = ["rust_media_codec/fdk-aac"]
+gpl-x264 = ["rust_media_codec/gpl-x264"]
