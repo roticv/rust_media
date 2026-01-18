@@ -98,9 +98,16 @@ This project is in active development. Current status:
 - 📋 H.264 decoder - Planned
 - 📋 AV1 codec - Planned
 
+### CLI Tool
+- ✅ **media_info** - Analyze media files (similar to ffprobe)
+  - Stream information display
+  - Packet analysis with timing and sizes
+  - Frame analysis with decoding
+  - JSON and text output formats
+  - See [rust_media_cli documentation](crates/rust_media_cli/README.md) for details
+
 ### Other
 - 📋 Filter system (scale, crop, format conversion, etc.) - Planned
-- 🚧 CLI tool
 
 ## Optional Features
 
