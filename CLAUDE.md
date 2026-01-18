@@ -46,7 +46,7 @@ x264 = { version = "...", optional = true }
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
 | H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
-| AAC (encode) | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
+| AAC | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
 | PCM | *(native)* | N/A | *(default)* | ✅ Implemented |
 
 ### Why This Approach?
@@ -90,12 +90,12 @@ rust_media/
 │   ├── rust_media_format/  # Container format implementations
 │   │   ├── WAV demuxer/muxer ✅
 │   │   ├── WebM demuxer/muxer ✅
-│   │   ├── MP4 muxer ✅ (demuxer planned)
+│   │   ├── MP4 demuxer/muxer ✅
 │   │   └── MKV demuxer/muxer (planned)
 │   │
 │   ├── rust_media_codec/   # Codec implementations
 │   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (encoder, gpl-x264), AV1 (planned)
-│   │   └── Audio: PCM ✅, Opus ✅, AAC ✅ (encoder, fdk-aac)
+│   │   └── Audio: PCM ✅, Opus ✅, AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)
 │   │   ├── Video: scale, crop, overlay, rotate
@@ -246,13 +246,14 @@ Build comprehensive testing infrastructure including:
   - Streaming API with incremental packet processing
   - Efficient: ~50% less overhead than FFmpeg output (363 bytes vs 711 bytes)
   - See `examples/webm_remux.rs` for usage
-- ✅ **MP4** (ISO Base Media File Format): Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
+- ✅ **MP4** (ISO Base Media File Format): Demuxer + Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
   - Supports H.264/AVC (avc1), VP9 (vp09), AAC (mp4a), and Opus audio
-  - Streaming API with incremental packet writing
-  - File structure: ftyp | mdat | moov (streaming-friendly)
+  - Muxer: Streaming API with incremental packet writing
+  - Muxer: File structure: ftyp | mdat | moov (streaming-friendly)
   - Complete sample table support: stts, stsc, stsz, stco/co64, stss, ctts
   - Automatic 64-bit chunk offsets for files > 4GB
-  - Demuxer planned for future implementation
+  - Demuxer: Parses moov box, builds sample table, sequential packet reading
+  - Demuxer: Supports seeking by timestamp
 - MKV (Matroska) - Planned
 
 **Video Codecs** (decoders/encoders) - Priority:
@@ -288,10 +289,11 @@ Build comprehensive testing infrastructure including:
 - ✅ **Opus**: Lossy codec for speech and music, optimized for low-latency transmission. **IMPLEMENTED** in `rust_media_codec/src/audio/opus.rs`
   - Requires: libopus (install via `brew install opus` on macOS, `apt-get install libopus-dev` on Linux)
   - Supports: 8, 12, 16, 24, 48 kHz sample rates, mono and stereo
-- ✅ **AAC** (encoder): AAC-LC encoding via libfdk-aac. **IMPLEMENTED** in `rust_media_codec/src/audio/fdk_aac.rs`
+- ✅ **AAC**: AAC-LC encoding and decoding via libfdk-aac. **IMPLEMENTED** in `rust_media_codec/src/audio/fdk_aac.rs`
   - Requires: libfdk-aac (install via `brew install fdk-aac` on macOS, `apt-get install libfdk-aac-dev` on Linux)
   - Requires feature flag: `fdk-aac`
-  - Supports: 8-96 kHz sample rates, mono and stereo
+  - Encoder: Supports 8-96 kHz sample rates, mono and stereo, raw AAC output for MP4 muxing
+  - Decoder: Supports ADTS-wrapped AAC and raw AAC with AudioSpecificConfig (for MP4)
   - License: Fraunhofer FDK AAC License (not GPL, but has some restrictions)
 
 **Image Codecs** (for thumbnails, still images) - Priority:

@@ -8,7 +8,10 @@
 //! - Audio: AAC (mp4a), Opus (Opus)
 
 pub mod boxes;
+pub mod demuxer;
 pub mod muxer;
+pub mod reader;
 pub mod writer;
 
+pub use demuxer::Mp4Demuxer;
 pub use muxer::Mp4Muxer;

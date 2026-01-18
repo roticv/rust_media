@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MP4 ✅ muxer, MKV planned)
-- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅, H.264 ✅ encoder, AAC ✅ encoder; AV1 planned)
+- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅, H.264 ✅ encoder, AAC ✅; AV1 planned)
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -85,8 +85,7 @@ This project is in active development. Current status:
 ### Container Formats
 - ✅ **WAV** demuxer + muxer (PCM audio)
 - ✅ **WebM** demuxer + muxer (VP8/VP9 video, Opus audio)
-- ✅ **MP4** muxer (H.264, VP9 video; AAC, Opus audio)
-- 📋 MP4 demuxer - Planned
+- ✅ **MP4** demuxer + muxer (H.264, VP9 video; AAC, Opus audio)
 - 📋 MKV demuxer/muxer - Planned
 
 ### Codecs
@@ -95,10 +94,9 @@ This project is in active development. Current status:
 - ✅ **VP8** codec (decoder + encoder via libvpx)
 - ✅ **VP9** codec (decoder + encoder via libvpx)
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
-- ✅ **AAC** encoder (via libfdk-aac, requires `fdk-aac` feature)
+- ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
 - 📋 H.264 decoder - Planned
 - 📋 AV1 codec - Planned
-- 📋 AAC decoder - Planned
 
 ### Other
 - 📋 Filter system (scale, crop, format conversion, etc.) - Planned
@@ -111,7 +109,7 @@ Some codecs require external libraries with specific licensing and are available
 | Feature | Codec | Library | License |
 |---------|-------|---------|---------|
 | `gpl-x264` | H.264 encoder | x264 | GPL v2+ |
-| `fdk-aac` | AAC encoder | libfdk-aac | Fraunhofer FDK AAC License |
+| `fdk-aac` | AAC encoder + decoder | libfdk-aac | Fraunhofer FDK AAC License |
 
 **Warning**: Enabling `gpl-x264` changes the license of compiled binaries to GPL.
 
