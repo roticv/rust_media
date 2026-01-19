@@ -19,6 +19,10 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
+
 [features]
 default = []
 fdk-aac = ["rust_media_codec/fdk-aac"]
