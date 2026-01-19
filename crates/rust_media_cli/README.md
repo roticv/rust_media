@@ -374,6 +374,72 @@ Transcoding complete!
 | TS/M2TS | ❌ | ✅ |
 | OGG | ❌ | ✅ |
 
+## Testing
+
+The CLI tool includes a comprehensive integration test suite that verifies both the `info` and `transform` commands work correctly.
+
+### Running Tests
+
+```bash
+# Run all CLI integration tests
+cargo test -p rust_media_cli --test integration_tests
+
+# Run specific test category
+cargo test -p rust_media_cli --test integration_tests stream_info
+cargo test -p rust_media_cli --test integration_tests packet_info
+cargo test -p rust_media_cli --test integration_tests frame_info
+cargo test -p rust_media_cli --test integration_tests transform
+cargo test -p rust_media_cli --test integration_tests text_output
+```
+
+### Test Coverage
+
+The integration test suite includes 29 tests across 5 categories:
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| `stream_info` | 4 | Verifies stream metadata for VP9, VP8, Opus, and WAV files |
+| `packet_info` | 7 | Tests packet counts, timing, sizes, and the `-n` limit option |
+| `frame_info` | 8 | Tests decoded frame counts, dimensions, timing, and metadata |
+| `transform` | 6 | Tests video/audio copy, VP8↔VP9 transcoding, WAV extraction |
+| `text_output` | 4 | Verifies CLI text output formatting |
+
+### Test Assets
+
+Tests use the following files from `test_assets/`:
+
+| File | Type | Description |
+|------|------|-------------|
+| `test_vp9.webm` | Video | 1 second, 640x480, VP9, 30 packets |
+| `test_vp8.webm` | Video | 1 second, 640x480, VP8, 30 packets |
+| `reference_opus.webm` | Audio | ~1 second, 48kHz stereo Opus, 51 packets |
+| `reference.wav` | Audio | 1 second, 48kHz stereo PCM |
+
+### What Tests Verify
+
+**Stream Info Tests:**
+- Format name, duration, stream count
+- Video: codec, dimensions, pixel format, frame rate, bit depth
+- Audio: codec, sample rate, channels, sample format
+
+**Packet Info Tests:**
+- Correct packet counts match expected values
+- PTS timing values are sequential and correct
+- Packet sizes are valid (keyframes larger than P-frames)
+- The `-n` option correctly limits output
+
+**Frame Info Tests:**
+- Decoded frame counts match packet counts
+- Frame dimensions match stream info
+- Frame PTS values match packet PTS values
+- Audio frames have correct channel count and sample count
+
+**Transform Tests:**
+- Stream copy preserves packet count
+- VP9→VP8 and VP8→VP9 transcoding produces valid output
+- Audio copy preserves stream metadata
+- WAV extraction produces valid PCM files
+
 ## Roadmap
 
 ### Planned Improvements

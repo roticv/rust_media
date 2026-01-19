@@ -50,6 +50,9 @@ cargo test --workspace
 
 # Run tests for a specific crate
 cargo test -p rust_media_core
+
+# Run CLI integration tests (tests info and transform commands)
+cargo test -p rust_media_cli --test integration_tests
 ```
 
 ## Architecture
