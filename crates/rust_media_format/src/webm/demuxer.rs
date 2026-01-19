@@ -391,7 +391,13 @@ impl<R: Read + Seek> Demuxer for WebmDemuxer<R> {
 
     fn read_packet(&mut self) -> Result<Packet> {
         loop {
-            let elem = Element::read(&mut self.reader)?;
+            let elem = match Element::read(&mut self.reader) {
+                Ok(elem) => elem,
+                Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Err(Error::EndOfStream);
+                }
+                Err(e) => return Err(e),
+            };
 
             match elem.id {
                 element_id::CLUSTER => {

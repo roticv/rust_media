@@ -99,11 +99,16 @@ This project is in active development. Current status:
 - 📋 AV1 codec - Planned
 
 ### CLI Tool
-- ✅ **media_info** - Analyze media files (similar to ffprobe)
+- ✅ **info** - Analyze media files (similar to ffprobe)
   - Stream information display
   - Packet analysis with timing and sizes
   - Frame analysis with decoding
   - JSON and text output formats
+- ✅ **transform** - Transcode media files (similar to ffmpeg)
+  - Video transcoding (VP8, VP9, H.264)
+  - Audio transcoding (Opus, AAC, PCM)
+  - Stream copy (passthrough)
+  - Bitrate control
   - See [rust_media_cli documentation](crates/rust_media_cli/README.md) for details
 
 ### Other

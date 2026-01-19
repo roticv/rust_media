@@ -3,13 +3,16 @@
 //! A Rust-based media conversion and processing tool (FFmpeg equivalent)
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rust_media::{Decoder, Demuxer, MediaType, StreamParams};
-use rust_media_format::mp4::Mp4Demuxer;
-use rust_media_format::wav::WavDemuxer;
-use rust_media_format::webm::WebmDemuxer;
+use rust_media::{
+    AudioStreamParams, Decoder, Demuxer, Encoder, Frame, MediaType, Muxer, Packet, PixelFormat,
+    SampleFormat, StreamInfo, StreamParams, VideoStreamParams,
+};
+use rust_media_format::mp4::{Mp4Demuxer, Mp4Muxer};
+use rust_media_format::wav::{WavDemuxer, WavMuxer};
+use rust_media_format::webm::{WebmDemuxer, WebmMuxer};
 use serde::Serialize;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -47,6 +50,53 @@ enum Commands {
         /// Output format
         #[arg(short = 'o', long, value_enum, default_value = "text")]
         output_format: OutputFormat,
+    },
+
+    /// Transform (transcode) media files (similar to ffmpeg)
+    Transform {
+        /// Input media file
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+
+        /// Output media file
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+
+        /// Video codec (vp8, vp9, h264, copy, none)
+        #[arg(short = 'v', long, default_value = "copy")]
+        video_codec: String,
+
+        /// Audio codec (opus, aac, pcm, copy, none)
+        #[arg(short = 'a', long, default_value = "copy")]
+        audio_codec: String,
+
+        /// Video bitrate in kbps (e.g., 1000 for 1 Mbps)
+        #[arg(long, default_value = "1000")]
+        video_bitrate: u64,
+
+        /// Audio bitrate in kbps (e.g., 128 for 128 kbps)
+        #[arg(long, default_value = "128")]
+        audio_bitrate: u64,
+
+        /// Select video stream by index (default: first video stream)
+        #[arg(long)]
+        video_stream: Option<usize>,
+
+        /// Select audio stream by index (default: first audio stream)
+        #[arg(long)]
+        audio_stream: Option<usize>,
+
+        /// Disable video output
+        #[arg(long)]
+        no_video: bool,
+
+        /// Disable audio output
+        #[arg(long)]
+        no_audio: bool,
+
+        /// Show progress during transcoding
+        #[arg(long)]
+        progress: bool,
     },
 }
 
@@ -186,12 +236,1031 @@ fn main() {
             stream,
             output_format,
         } => {
-            if let Err(e) = run_info(&input, show_packets, show_frames, count, stream, output_format)
+            if let Err(e) =
+                run_info(&input, show_packets, show_frames, count, stream, output_format)
             {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         }
+        Commands::Transform {
+            input,
+            output,
+            video_codec,
+            audio_codec,
+            video_bitrate,
+            audio_bitrate,
+            video_stream,
+            audio_stream,
+            no_video,
+            no_audio,
+            progress,
+        } => {
+            if let Err(e) = run_transform(
+                &input,
+                &output,
+                &video_codec,
+                &audio_codec,
+                video_bitrate * 1000, // Convert kbps to bps
+                audio_bitrate * 1000, // Convert kbps to bps
+                video_stream,
+                audio_stream,
+                no_video,
+                no_audio,
+                progress,
+            ) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Transform (transcode) implementation
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn run_transform(
+    input: &PathBuf,
+    output: &PathBuf,
+    video_codec: &str,
+    audio_codec: &str,
+    video_bitrate: u64,
+    audio_bitrate: u64,
+    video_stream_idx: Option<usize>,
+    audio_stream_idx: Option<usize>,
+    no_video: bool,
+    no_audio: bool,
+    progress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let input_filename = input.to_string_lossy().to_string();
+    let output_filename = output.to_string_lossy().to_string();
+
+    // Detect input format
+    let input_ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Detect output format
+    let output_ext = output
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    println!("Input:  {} ({})", input_filename, input_ext);
+    println!("Output: {} ({})", output_filename, output_ext);
+
+    // Open demuxer and get streams
+    let (streams, duration) = match input_ext.as_str() {
+        "mp4" | "m4a" | "m4v" | "mov" => {
+            let file = File::open(&input_filename)?;
+            let reader = BufReader::new(file);
+            let demuxer = Mp4Demuxer::new(reader)?;
+            let container = demuxer.container_info()?;
+            (demuxer.streams()?, container.duration)
+        }
+        "webm" => {
+            let file = File::open(&input_filename)?;
+            let reader = BufReader::new(file);
+            let demuxer = WebmDemuxer::open(reader)?;
+            let container = demuxer.container_info()?;
+            (demuxer.streams()?, container.duration)
+        }
+        "wav" => {
+            let file = File::open(&input_filename)?;
+            let reader = BufReader::new(file);
+            let demuxer = WavDemuxer::open(reader)?;
+            let container = demuxer.container_info()?;
+            (demuxer.streams()?, container.duration)
+        }
+        _ => {
+            return Err(format!("Unsupported input format: {}", input_ext).into());
+        }
+    };
+
+    // Find video and audio streams
+    let video_stream = if no_video {
+        None
+    } else {
+        video_stream_idx
+            .and_then(|idx| streams.get(idx).cloned())
+            .or_else(|| {
+                streams
+                    .iter()
+                    .find(|s| s.media_type == MediaType::Video)
+                    .cloned()
+            })
+    };
+
+    let audio_stream = if no_audio {
+        None
+    } else {
+        audio_stream_idx
+            .and_then(|idx| streams.get(idx).cloned())
+            .or_else(|| {
+                streams
+                    .iter()
+                    .find(|s| s.media_type == MediaType::Audio)
+                    .cloned()
+            })
+    };
+
+    // Print stream info
+    if let Some(ref vs) = video_stream {
+        println!(
+            "Video:  Stream #{} ({}) -> {}",
+            vs.index,
+            vs.codec,
+            if video_codec == "copy" {
+                vs.codec.clone()
+            } else if video_codec == "none" {
+                "disabled".to_string()
+            } else {
+                video_codec.to_string()
+            }
+        );
+    }
+
+    if let Some(ref aus) = audio_stream {
+        println!(
+            "Audio:  Stream #{} ({}) -> {}",
+            aus.index,
+            aus.codec,
+            if audio_codec == "copy" {
+                aus.codec.clone()
+            } else if audio_codec == "none" {
+                "disabled".to_string()
+            } else {
+                audio_codec.to_string()
+            }
+        );
+    }
+
+    println!();
+
+    // Perform the actual transcoding
+    match output_ext.as_str() {
+        "mp4" | "m4a" | "m4v" | "mov" => {
+            transcode_to_mp4(
+                &input_filename,
+                &input_ext,
+                &output_filename,
+                video_stream,
+                audio_stream,
+                video_codec,
+                audio_codec,
+                video_bitrate,
+                audio_bitrate,
+                duration,
+                progress,
+            )?;
+        }
+        "webm" => {
+            transcode_to_webm(
+                &input_filename,
+                &input_ext,
+                &output_filename,
+                video_stream,
+                audio_stream,
+                video_codec,
+                audio_codec,
+                video_bitrate,
+                audio_bitrate,
+                duration,
+                progress,
+            )?;
+        }
+        "wav" => {
+            transcode_to_wav(
+                &input_filename,
+                &input_ext,
+                &output_filename,
+                audio_stream,
+                audio_codec,
+                duration,
+                progress,
+            )?;
+        }
+        _ => {
+            return Err(format!("Unsupported output format: {}", output_ext).into());
+        }
+    }
+
+    println!("Transcoding complete!");
+    Ok(())
+}
+
+// ============================================================================
+// Transcode to MP4
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn transcode_to_mp4(
+    input_filename: &str,
+    input_ext: &str,
+    output_filename: &str,
+    video_stream: Option<StreamInfo>,
+    audio_stream: Option<StreamInfo>,
+    video_codec: &str,
+    audio_codec: &str,
+    video_bitrate: u64,
+    audio_bitrate: u64,
+    duration: Option<i64>,
+    progress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output_file = File::create(output_filename)?;
+    let mut writer = BufWriter::new(output_file);
+    let mut muxer = Mp4Muxer::new(&mut writer);
+
+    // Track output stream indices
+    let mut video_out_idx: Option<usize> = None;
+    let mut audio_out_idx: Option<usize> = None;
+    let mut current_out_idx = 0;
+
+    // Add video stream to muxer
+    if let Some(ref vs) = video_stream {
+        if video_codec != "none" {
+            let out_codec = if video_codec == "copy" {
+                vs.codec.clone()
+            } else {
+                video_codec.to_string()
+            };
+            let mut out_stream = vs.clone();
+            out_stream.index = current_out_idx;
+            out_stream.codec = out_codec;
+            out_stream.bitrate = Some(video_bitrate);
+            muxer.add_stream(out_stream)?;
+            video_out_idx = Some(current_out_idx);
+            current_out_idx += 1;
+        }
+    }
+
+    // Add audio stream to muxer
+    if let Some(ref aus) = audio_stream {
+        if audio_codec != "none" {
+            let out_codec = if audio_codec == "copy" {
+                aus.codec.clone()
+            } else {
+                audio_codec.to_string()
+            };
+            let mut out_stream = aus.clone();
+            out_stream.index = current_out_idx;
+            out_stream.codec = out_codec.clone();
+            out_stream.bitrate = Some(audio_bitrate);
+
+            // For AAC, we need to set up the encoder and get AudioSpecificConfig
+            if out_codec == "aac" && audio_codec != "copy" {
+                #[cfg(feature = "fdk-aac")]
+                {
+                    // Create encoder to get AudioSpecificConfig
+                    let encoder = rust_media_codec::FdkAacEncoder::new(out_stream.clone())?;
+                    out_stream.extra_data = encoder.audio_specific_config().to_vec();
+                }
+            }
+
+            muxer.add_stream(out_stream)?;
+            audio_out_idx = Some(current_out_idx);
+            // current_out_idx += 1;  // Not used after this
+        }
+    }
+
+    muxer.write_header()?;
+
+    // Create the transcode pipeline
+    run_transcode_pipeline(
+        input_filename,
+        input_ext,
+        &mut muxer,
+        video_stream,
+        audio_stream,
+        video_out_idx,
+        audio_out_idx,
+        video_codec,
+        audio_codec,
+        video_bitrate,
+        audio_bitrate,
+        duration,
+        progress,
+    )?;
+
+    muxer.write_trailer()?;
+    muxer.flush()?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Transcode to WebM
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn transcode_to_webm(
+    input_filename: &str,
+    input_ext: &str,
+    output_filename: &str,
+    video_stream: Option<StreamInfo>,
+    audio_stream: Option<StreamInfo>,
+    video_codec: &str,
+    audio_codec: &str,
+    video_bitrate: u64,
+    audio_bitrate: u64,
+    duration: Option<i64>,
+    progress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output_file = File::create(output_filename)?;
+    let writer = BufWriter::new(output_file);
+    let mut muxer = WebmMuxer::new(writer);
+
+    // Track output stream indices
+    let mut video_out_idx: Option<usize> = None;
+    let mut audio_out_idx: Option<usize> = None;
+    let mut current_out_idx = 0;
+
+    // Add video stream to muxer
+    if let Some(ref vs) = video_stream {
+        if video_codec != "none" {
+            let out_codec = if video_codec == "copy" {
+                vs.codec.clone()
+            } else {
+                video_codec.to_string()
+            };
+
+            // WebM only supports VP8, VP9, AV1 for video
+            if !["vp8", "vp9", "av1", "copy"].contains(&out_codec.as_str())
+                && video_codec != "copy"
+            {
+                return Err(format!(
+                    "WebM only supports VP8, VP9, AV1 video codecs, not {}",
+                    out_codec
+                )
+                .into());
+            }
+
+            let mut out_stream = vs.clone();
+            out_stream.index = current_out_idx;
+            out_stream.codec = out_codec;
+            out_stream.bitrate = Some(video_bitrate);
+            muxer.add_stream(out_stream)?;
+            video_out_idx = Some(current_out_idx);
+            current_out_idx += 1;
+        }
+    }
+
+    // Add audio stream to muxer
+    if let Some(ref aus) = audio_stream {
+        if audio_codec != "none" {
+            let out_codec = if audio_codec == "copy" {
+                aus.codec.clone()
+            } else {
+                audio_codec.to_string()
+            };
+
+            // WebM only supports Opus and Vorbis for audio
+            if !["opus", "vorbis", "copy"].contains(&out_codec.as_str()) && audio_codec != "copy" {
+                return Err(format!(
+                    "WebM only supports Opus and Vorbis audio codecs, not {}",
+                    out_codec
+                )
+                .into());
+            }
+
+            let mut out_stream = aus.clone();
+            out_stream.index = current_out_idx;
+            out_stream.codec = out_codec;
+            out_stream.bitrate = Some(audio_bitrate);
+            muxer.add_stream(out_stream)?;
+            audio_out_idx = Some(current_out_idx);
+            // current_out_idx += 1;  // Not used after this
+        }
+    }
+
+    muxer.write_header()?;
+
+    // Create the transcode pipeline
+    run_transcode_pipeline(
+        input_filename,
+        input_ext,
+        &mut muxer,
+        video_stream,
+        audio_stream,
+        video_out_idx,
+        audio_out_idx,
+        video_codec,
+        audio_codec,
+        video_bitrate,
+        audio_bitrate,
+        duration,
+        progress,
+    )?;
+
+    muxer.write_trailer()?;
+    muxer.flush()?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Transcode to WAV
+// ============================================================================
+
+fn transcode_to_wav(
+    input_filename: &str,
+    input_ext: &str,
+    output_filename: &str,
+    audio_stream: Option<StreamInfo>,
+    audio_codec: &str,
+    duration: Option<i64>,
+    progress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let audio_stream =
+        audio_stream.ok_or("No audio stream found for WAV output")?;
+
+    if audio_codec != "pcm" && audio_codec != "copy" {
+        return Err("WAV format only supports PCM audio codec".into());
+    }
+
+    // Create WAV muxer
+    let output_file = File::create(output_filename)?;
+    let writer = BufWriter::new(output_file);
+    let mut muxer = WavMuxer::new(writer);
+
+    // Create PCM stream for WAV output
+    let mut out_stream = audio_stream.clone();
+    out_stream.index = 0;
+    out_stream.codec = "pcm".to_string();
+    muxer.add_stream(out_stream)?;
+    muxer.write_header()?;
+
+    // Create decoder for audio
+    let mut decoder = create_decoder_for_stream(&audio_stream)?;
+
+    // Open demuxer
+    match input_ext {
+        "mp4" | "m4a" | "m4v" | "mov" => {
+            let file = File::open(input_filename)?;
+            let reader = BufReader::new(file);
+            let mut demuxer = Mp4Demuxer::new(reader)?;
+            process_audio_to_wav(
+                &mut demuxer,
+                &mut decoder,
+                &mut muxer,
+                audio_stream.index,
+                duration,
+                progress,
+            )?;
+        }
+        "webm" => {
+            let file = File::open(input_filename)?;
+            let reader = BufReader::new(file);
+            let mut demuxer = WebmDemuxer::open(reader)?;
+            process_audio_to_wav(
+                &mut demuxer,
+                &mut decoder,
+                &mut muxer,
+                audio_stream.index,
+                duration,
+                progress,
+            )?;
+        }
+        "wav" => {
+            let file = File::open(input_filename)?;
+            let reader = BufReader::new(file);
+            let mut demuxer = WavDemuxer::open(reader)?;
+            process_audio_to_wav(
+                &mut demuxer,
+                &mut decoder,
+                &mut muxer,
+                audio_stream.index,
+                duration,
+                progress,
+            )?;
+        }
+        _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
+    }
+
+    muxer.write_trailer()?;
+    muxer.flush()?;
+    Ok(())
+}
+
+fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
+    demuxer: &mut D,
+    decoder: &mut Box<dyn DecoderWrapper>,
+    muxer: &mut WavMuxer<W>,
+    audio_stream_idx: usize,
+    duration: Option<i64>,
+    progress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut packet_count = 0;
+    let mut frame_count = 0;
+    let start_time = std::time::Instant::now();
+
+    loop {
+        match demuxer.read_packet() {
+            Ok(packet) => {
+                if packet.stream_index() != audio_stream_idx {
+                    continue;
+                }
+
+                packet_count += 1;
+
+                decoder.send_packet(&packet)?;
+
+                while let Ok(frame) = decoder.receive_frame() {
+                    frame_count += 1;
+
+                    // Get PCM data from frame and write as packet
+                    if let Some(data) = frame.data().first() {
+                        let pcm_packet = rust_media::Packet::new(data.to_vec(), 0, MediaType::Audio)
+                            .with_pts(frame.pts().unwrap_or(0))
+                            .with_duration(frame.duration().unwrap_or(0));
+                        muxer.write_packet(&pcm_packet)?;
+                    }
+
+                    if progress && frame_count % 100 == 0 {
+                        print_progress(frame.pts(), duration, start_time);
+                    }
+                }
+            }
+            Err(rust_media::Error::EndOfStream) => break,
+            Err(e) => return Err(format!("Demuxer error: {:?}", e).into()),
+        }
+    }
+
+    // Flush decoder
+    decoder.flush()?;
+    while let Ok(frame) = decoder.receive_frame() {
+        if let Some(data) = frame.data().first() {
+            let pcm_packet = rust_media::Packet::new(data.to_vec(), 0, MediaType::Audio)
+                .with_pts(frame.pts().unwrap_or(0))
+                .with_duration(frame.duration().unwrap_or(0));
+            muxer.write_packet(&pcm_packet)?;
+        }
+    }
+
+    if progress {
+        println!();
+    }
+
+    println!(
+        "Processed {} packets, {} frames in {:.2}s",
+        packet_count,
+        frame_count,
+        start_time.elapsed().as_secs_f64()
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Generic transcode pipeline
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn run_transcode_pipeline<M: Muxer>(
+    input_filename: &str,
+    input_ext: &str,
+    muxer: &mut M,
+    video_stream: Option<StreamInfo>,
+    audio_stream: Option<StreamInfo>,
+    video_out_idx: Option<usize>,
+    audio_out_idx: Option<usize>,
+    video_codec: &str,
+    audio_codec: &str,
+    video_bitrate: u64,
+    audio_bitrate: u64,
+    duration: Option<i64>,
+    progress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create decoders and encoders
+    let mut video_decoder: Option<Box<dyn DecoderWrapper>> = None;
+    let mut video_encoder: Option<Box<dyn EncoderWrapper>> = None;
+    let mut audio_decoder: Option<Box<dyn DecoderWrapper>> = None;
+    let mut audio_encoder: Option<Box<dyn EncoderWrapper>> = None;
+
+    let video_in_idx = video_stream.as_ref().map(|s| s.index);
+    let audio_in_idx = audio_stream.as_ref().map(|s| s.index);
+
+    // Setup video pipeline
+    if let Some(ref vs) = video_stream {
+        if video_codec != "none" && video_codec != "copy" {
+            video_decoder = Some(create_decoder_for_stream(vs)?);
+            video_encoder = Some(create_video_encoder(vs, video_codec, video_bitrate)?);
+        }
+    }
+
+    // Setup audio pipeline
+    if let Some(ref aus) = audio_stream {
+        if audio_codec != "none" && audio_codec != "copy" {
+            audio_decoder = Some(create_decoder_for_stream(aus)?);
+            audio_encoder = Some(create_audio_encoder(aus, audio_codec, audio_bitrate)?);
+        }
+    }
+
+    let start_time = std::time::Instant::now();
+    let mut packet_count = 0;
+    let mut frame_count = 0;
+
+    // Open input demuxer and process
+    match input_ext {
+        "mp4" | "m4a" | "m4v" | "mov" => {
+            let file = File::open(input_filename)?;
+            let reader = BufReader::new(file);
+            let mut demuxer = Mp4Demuxer::new(reader)?;
+
+            process_packets(
+                &mut demuxer,
+                muxer,
+                video_in_idx,
+                audio_in_idx,
+                video_out_idx,
+                audio_out_idx,
+                &mut video_decoder,
+                &mut video_encoder,
+                &mut audio_decoder,
+                &mut audio_encoder,
+                video_codec,
+                audio_codec,
+                duration,
+                progress,
+                &mut packet_count,
+                &mut frame_count,
+                start_time,
+            )?;
+        }
+        "webm" => {
+            let file = File::open(input_filename)?;
+            let reader = BufReader::new(file);
+            let mut demuxer = WebmDemuxer::open(reader)?;
+
+            process_packets(
+                &mut demuxer,
+                muxer,
+                video_in_idx,
+                audio_in_idx,
+                video_out_idx,
+                audio_out_idx,
+                &mut video_decoder,
+                &mut video_encoder,
+                &mut audio_decoder,
+                &mut audio_encoder,
+                video_codec,
+                audio_codec,
+                duration,
+                progress,
+                &mut packet_count,
+                &mut frame_count,
+                start_time,
+            )?;
+        }
+        "wav" => {
+            let file = File::open(input_filename)?;
+            let reader = BufReader::new(file);
+            let mut demuxer = WavDemuxer::open(reader)?;
+
+            process_packets(
+                &mut demuxer,
+                muxer,
+                video_in_idx,
+                audio_in_idx,
+                video_out_idx,
+                audio_out_idx,
+                &mut video_decoder,
+                &mut video_encoder,
+                &mut audio_decoder,
+                &mut audio_encoder,
+                video_codec,
+                audio_codec,
+                duration,
+                progress,
+                &mut packet_count,
+                &mut frame_count,
+                start_time,
+            )?;
+        }
+        _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
+    }
+
+    if progress {
+        println!();
+    }
+
+    println!(
+        "Processed {} packets, {} frames in {:.2}s",
+        packet_count,
+        frame_count,
+        start_time.elapsed().as_secs_f64()
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_packets<D: Demuxer, M: Muxer>(
+    demuxer: &mut D,
+    muxer: &mut M,
+    video_in_idx: Option<usize>,
+    audio_in_idx: Option<usize>,
+    video_out_idx: Option<usize>,
+    audio_out_idx: Option<usize>,
+    video_decoder: &mut Option<Box<dyn DecoderWrapper>>,
+    video_encoder: &mut Option<Box<dyn EncoderWrapper>>,
+    audio_decoder: &mut Option<Box<dyn DecoderWrapper>>,
+    audio_encoder: &mut Option<Box<dyn EncoderWrapper>>,
+    video_codec: &str,
+    audio_codec: &str,
+    duration: Option<i64>,
+    progress: bool,
+    packet_count: &mut usize,
+    frame_count: &mut usize,
+    start_time: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        match demuxer.read_packet() {
+            Ok(packet) => {
+                let stream_idx = packet.stream_index();
+                *packet_count += 1;
+
+                // Handle video packet
+                if Some(stream_idx) == video_in_idx {
+                    if let Some(out_idx) = video_out_idx {
+                        if video_codec == "copy" {
+                            // Passthrough
+                            let mut out_packet = packet.clone();
+                            out_packet.set_stream_index(out_idx);
+                            muxer.write_packet(&out_packet)?;
+                        } else if let (Some(decoder), Some(encoder)) =
+                            (video_decoder.as_mut(), video_encoder.as_mut())
+                        {
+                            // Transcode
+                            decoder.send_packet(&packet)?;
+                            while let Ok(frame) = decoder.receive_frame() {
+                                *frame_count += 1;
+                                encoder.send_frame(&frame)?;
+                                while let Ok(mut enc_packet) = encoder.receive_packet() {
+                                    enc_packet.set_stream_index(out_idx);
+                                    muxer.write_packet(&enc_packet)?;
+                                }
+
+                                if progress && *frame_count % 100 == 0 {
+                                    print_progress(frame.pts(), duration, start_time);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Handle audio packet
+                if Some(stream_idx) == audio_in_idx {
+                    if let Some(out_idx) = audio_out_idx {
+                        if audio_codec == "copy" {
+                            // Passthrough
+                            let mut out_packet = packet.clone();
+                            out_packet.set_stream_index(out_idx);
+                            muxer.write_packet(&out_packet)?;
+                        } else if let (Some(decoder), Some(encoder)) =
+                            (audio_decoder.as_mut(), audio_encoder.as_mut())
+                        {
+                            // Transcode
+                            decoder.send_packet(&packet)?;
+                            while let Ok(frame) = decoder.receive_frame() {
+                                *frame_count += 1;
+                                encoder.send_frame(&frame)?;
+                                while let Ok(mut enc_packet) = encoder.receive_packet() {
+                                    enc_packet.set_stream_index(out_idx);
+                                    muxer.write_packet(&enc_packet)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(rust_media::Error::EndOfStream) => break,
+            Err(e) => return Err(format!("Demuxer error: {:?}", e).into()),
+        }
+    }
+
+    // Flush video encoder
+    if let (Some(decoder), Some(encoder)) = (video_decoder.as_mut(), video_encoder.as_mut()) {
+        decoder.flush()?;
+        while let Ok(frame) = decoder.receive_frame() {
+            encoder.send_frame(&frame)?;
+            while let Ok(mut enc_packet) = encoder.receive_packet() {
+                if let Some(out_idx) = video_out_idx {
+                    enc_packet.set_stream_index(out_idx);
+                    muxer.write_packet(&enc_packet)?;
+                }
+            }
+        }
+
+        encoder.flush()?;
+        while let Ok(mut enc_packet) = encoder.receive_packet() {
+            if let Some(out_idx) = video_out_idx {
+                enc_packet.set_stream_index(out_idx);
+                muxer.write_packet(&enc_packet)?;
+            }
+        }
+    }
+
+    // Flush audio encoder
+    if let (Some(decoder), Some(encoder)) = (audio_decoder.as_mut(), audio_encoder.as_mut()) {
+        decoder.flush()?;
+        while let Ok(frame) = decoder.receive_frame() {
+            encoder.send_frame(&frame)?;
+            while let Ok(mut enc_packet) = encoder.receive_packet() {
+                if let Some(out_idx) = audio_out_idx {
+                    enc_packet.set_stream_index(out_idx);
+                    muxer.write_packet(&enc_packet)?;
+                }
+            }
+        }
+
+        encoder.flush()?;
+        while let Ok(mut enc_packet) = encoder.receive_packet() {
+            if let Some(out_idx) = audio_out_idx {
+                enc_packet.set_stream_index(out_idx);
+                muxer.write_packet(&enc_packet)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_progress(pts: Option<i64>, duration: Option<i64>, start_time: std::time::Instant) {
+    if let (Some(pts), Some(dur)) = (pts, duration) {
+        if dur > 0 {
+            let progress_pct = (pts as f64 / dur as f64 * 100.0).min(100.0);
+            let elapsed = start_time.elapsed().as_secs_f64();
+            print!(
+                "\rProgress: {:.1}% ({:.1}s elapsed)    ",
+                progress_pct, elapsed
+            );
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
+// ============================================================================
+// Decoder wrapper trait for dynamic dispatch
+// ============================================================================
+
+trait DecoderWrapper {
+    fn send_packet(&mut self, packet: &Packet) -> rust_media::Result<()>;
+    fn receive_frame(&mut self) -> rust_media::Result<Frame>;
+    fn flush(&mut self) -> rust_media::Result<()>;
+}
+
+impl<D: Decoder> DecoderWrapper for D {
+    fn send_packet(&mut self, packet: &Packet) -> rust_media::Result<()> {
+        Decoder::send_packet(self, packet)
+    }
+
+    fn receive_frame(&mut self) -> rust_media::Result<Frame> {
+        Decoder::receive_frame(self)
+    }
+
+    fn flush(&mut self) -> rust_media::Result<()> {
+        Decoder::flush(self)
+    }
+}
+
+// ============================================================================
+// Encoder wrapper trait for dynamic dispatch
+// ============================================================================
+
+trait EncoderWrapper {
+    fn send_frame(&mut self, frame: &Frame) -> rust_media::Result<()>;
+    fn receive_packet(&mut self) -> rust_media::Result<Packet>;
+    fn flush(&mut self) -> rust_media::Result<()>;
+}
+
+impl<E: Encoder> EncoderWrapper for E {
+    fn send_frame(&mut self, frame: &Frame) -> rust_media::Result<()> {
+        Encoder::send_frame(self, frame)
+    }
+
+    fn receive_packet(&mut self) -> rust_media::Result<Packet> {
+        Encoder::receive_packet(self)
+    }
+
+    fn flush(&mut self) -> rust_media::Result<()> {
+        Encoder::flush(self)
+    }
+}
+
+// ============================================================================
+// Decoder/Encoder creation functions
+// ============================================================================
+
+fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
+    match stream.codec.as_str() {
+        "pcm" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" => {
+            rust_media_codec::PcmDecoder::new(stream.clone())
+                .ok()
+                .map(|d| Box::new(d) as Box<dyn DecoderWrapper>)
+        }
+        "opus" => rust_media_codec::OpusDecoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "vp8" => rust_media_codec::Vp8Decoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "vp9" => rust_media_codec::Vp9Decoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        #[cfg(feature = "fdk-aac")]
+        "aac" => rust_media_codec::FdkAacDecoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        _ => None,
+    }
+}
+
+fn create_decoder_for_stream(
+    stream: &StreamInfo,
+) -> Result<Box<dyn DecoderWrapper>, Box<dyn std::error::Error>> {
+    create_decoder(stream).ok_or_else(|| format!("No decoder available for codec: {}", stream.codec).into())
+}
+
+fn create_video_encoder(
+    input_stream: &StreamInfo,
+    codec: &str,
+    bitrate: u64,
+) -> Result<Box<dyn EncoderWrapper>, Box<dyn std::error::Error>> {
+    let (width, height, frame_rate) = match &input_stream.params {
+        StreamParams::Video(params) => (params.width, params.height, params.frame_rate),
+        _ => return Err("Not a video stream".into()),
+    };
+
+    let video_params = VideoStreamParams::new(width, height, PixelFormat::YUV420P)
+        .with_frame_rate(frame_rate.0, frame_rate.1);
+
+    let mut stream_info = StreamInfo::new(0, MediaType::Video, codec.to_string())
+        .with_params(StreamParams::Video(video_params))
+        .with_bitrate(bitrate)
+        .with_time_base(1, 1000000);
+
+    // Copy extra data if same codec
+    if input_stream.codec == codec {
+        stream_info.extra_data = input_stream.extra_data.clone();
+    }
+
+    match codec {
+        "vp8" => {
+            let encoder = rust_media_codec::Vp8Encoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        "vp9" => {
+            let encoder = rust_media_codec::Vp9Encoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        #[cfg(feature = "gpl-x264")]
+        "h264" => {
+            let encoder = rust_media_codec::X264Encoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        _ => Err(format!("No encoder available for video codec: {}", codec).into()),
+    }
+}
+
+fn create_audio_encoder(
+    input_stream: &StreamInfo,
+    codec: &str,
+    bitrate: u64,
+) -> Result<Box<dyn EncoderWrapper>, Box<dyn std::error::Error>> {
+    let (sample_rate, channels) = match &input_stream.params {
+        StreamParams::Audio(params) => (params.sample_rate, params.channels),
+        _ => return Err("Not an audio stream".into()),
+    };
+
+    let audio_params = AudioStreamParams::new(sample_rate, channels, SampleFormat::S16);
+
+    let stream_info = StreamInfo::new(0, MediaType::Audio, codec.to_string())
+        .with_params(StreamParams::Audio(audio_params))
+        .with_bitrate(bitrate)
+        .with_time_base(1, sample_rate);
+
+    match codec {
+        "opus" => {
+            let encoder = rust_media_codec::OpusEncoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        "pcm" => {
+            let encoder = rust_media_codec::PcmEncoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        #[cfg(feature = "fdk-aac")]
+        "aac" => {
+            let encoder = rust_media_codec::FdkAacEncoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        _ => Err(format!("No encoder available for audio codec: {}", codec).into()),
     }
 }
 
@@ -289,10 +1358,7 @@ fn analyze_mp4(
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
 
-    let streams: Vec<StreamInfoJson> = raw_streams
-        .iter()
-        .map(|s| stream_to_json(s))
-        .collect();
+    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(|s| stream_to_json(s)).collect();
 
     let mut packets = Vec::new();
     let mut frames = Vec::new();
@@ -346,10 +1412,7 @@ fn analyze_webm(
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
 
-    let streams: Vec<StreamInfoJson> = raw_streams
-        .iter()
-        .map(|s| stream_to_json(s))
-        .collect();
+    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(|s| stream_to_json(s)).collect();
 
     let mut packets = Vec::new();
     let mut frames = Vec::new();
@@ -403,10 +1466,7 @@ fn analyze_wav(
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
 
-    let streams: Vec<StreamInfoJson> = raw_streams
-        .iter()
-        .map(|s| stream_to_json(s))
-        .collect();
+    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(|s| stream_to_json(s)).collect();
 
     let mut packets = Vec::new();
     let mut frames = Vec::new();
@@ -442,7 +1502,7 @@ fn analyze_wav(
 
 fn collect_packets_and_frames<D: Demuxer>(
     demuxer: &mut D,
-    streams: &[rust_media::StreamInfo],
+    streams: &[StreamInfo],
     time_bases: &[(u32, u32)],
     show_packets: bool,
     show_frames: bool,
@@ -456,10 +1516,7 @@ fn collect_packets_and_frames<D: Demuxer>(
 
     // Create decoders for frame analysis if needed
     let mut decoders: Vec<Option<Box<dyn DecoderWrapper>>> = if show_frames {
-        streams
-            .iter()
-            .map(|s| create_decoder(s))
-            .collect()
+        streams.iter().map(|s| create_decoder(s)).collect()
     } else {
         vec![]
     };
@@ -510,7 +1567,7 @@ fn collect_packets_and_frames<D: Demuxer>(
                                     pict_type: Some(if frame.is_keyframe() {
                                         "I".to_string()
                                     } else {
-                                        "P".to_string() // Simplified - actual B-frame detection requires codec-specific parsing
+                                        "P".to_string()
                                     }),
                                     params: frame_to_params_json(&frame),
                                 };
@@ -529,7 +1586,11 @@ fn collect_packets_and_frames<D: Demuxer>(
                 packet_index += 1;
 
                 // Check count limit
-                let check_count = if show_frames { frames.len() } else { packets.len() };
+                let check_count = if show_frames {
+                    frames.len()
+                } else {
+                    packets.len()
+                };
                 if count > 0 && check_count >= count {
                     break;
                 }
@@ -575,58 +1636,10 @@ fn collect_packets_and_frames<D: Demuxer>(
 }
 
 // ============================================================================
-// Decoder wrapper trait for dynamic dispatch
-// ============================================================================
-
-trait DecoderWrapper {
-    fn send_packet(&mut self, packet: &rust_media::Packet) -> rust_media::Result<()>;
-    fn receive_frame(&mut self) -> rust_media::Result<rust_media::Frame>;
-    fn flush(&mut self) -> rust_media::Result<()>;
-}
-
-impl<D: Decoder> DecoderWrapper for D {
-    fn send_packet(&mut self, packet: &rust_media::Packet) -> rust_media::Result<()> {
-        Decoder::send_packet(self, packet)
-    }
-
-    fn receive_frame(&mut self) -> rust_media::Result<rust_media::Frame> {
-        Decoder::receive_frame(self)
-    }
-
-    fn flush(&mut self) -> rust_media::Result<()> {
-        Decoder::flush(self)
-    }
-}
-
-fn create_decoder(stream: &rust_media::StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
-    match stream.codec.as_str() {
-        "pcm" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" => {
-            rust_media_codec::PcmDecoder::new(stream.clone())
-                .ok()
-                .map(|d| Box::new(d) as Box<dyn DecoderWrapper>)
-        }
-        "opus" => rust_media_codec::OpusDecoder::new(stream.clone())
-            .ok()
-            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
-        "vp8" => rust_media_codec::Vp8Decoder::new(stream.clone())
-            .ok()
-            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
-        "vp9" => rust_media_codec::Vp9Decoder::new(stream.clone())
-            .ok()
-            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
-        #[cfg(feature = "fdk-aac")]
-        "aac" => rust_media_codec::FdkAacDecoder::new(stream.clone())
-            .ok()
-            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
-        _ => None,
-    }
-}
-
-// ============================================================================
 // Helper functions
 // ============================================================================
 
-fn stream_to_json(stream: &rust_media::StreamInfo) -> StreamInfoJson {
+fn stream_to_json(stream: &StreamInfo) -> StreamInfoJson {
     StreamInfoJson {
         index: stream.index,
         media_type: format!("{:?}", stream.media_type).to_lowercase(),
@@ -656,7 +1669,7 @@ fn stream_to_json(stream: &rust_media::StreamInfo) -> StreamInfoJson {
     }
 }
 
-fn frame_to_params_json(frame: &rust_media::Frame) -> FrameParamsJson {
+fn frame_to_params_json(frame: &Frame) -> FrameParamsJson {
     match frame.media_type() {
         MediaType::Video => {
             if let Some(params) = frame.video_params() {
@@ -722,7 +1735,10 @@ fn print_text_output(info: &MediaInfo) {
     // Streams section
     println!("Streams:");
     for stream in &info.streams {
-        print!("  Stream #{}: {} ({})", stream.index, stream.media_type, stream.codec);
+        print!(
+            "  Stream #{}: {} ({})",
+            stream.index, stream.media_type, stream.codec
+        );
 
         match &stream.params {
             StreamParamsJson::Video {

@@ -149,6 +149,124 @@ $ rust_media info test.webm -o json
 }
 ```
 
+### `transform` - Media Transcoding
+
+The `transform` command transcodes (converts) media files between different formats and codecs. It provides functionality similar to `ffmpeg`.
+
+#### Basic Usage
+
+```bash
+# Copy video and audio streams (remux only)
+rust_media transform input.webm output.webm -v copy -a copy
+
+# Transcode video from VP9 to VP8
+rust_media transform input.webm output.webm -v vp8 -a copy
+
+# Extract audio to WAV
+rust_media transform input.webm output.wav -a pcm --no-video
+
+# Transcode with progress display
+rust_media transform input.webm output.webm -v vp8 -a opus --progress
+
+# Set video bitrate
+rust_media transform input.webm output.webm -v vp9 --video-bitrate 2000
+
+# Disable audio output (video only)
+rust_media transform input.webm output.webm -v copy --no-audio
+```
+
+#### Command Options
+
+| Option | Description |
+|--------|-------------|
+| `-v, --video-codec <CODEC>` | Video codec: `vp8`, `vp9`, `h264`*, `copy`, or `none` (default: `copy`) |
+| `-a, --audio-codec <CODEC>` | Audio codec: `opus`, `aac`**, `pcm`, `copy`, or `none` (default: `copy`) |
+| `--video-bitrate <KBPS>` | Video bitrate in kbps (default: 1000) |
+| `--audio-bitrate <KBPS>` | Audio bitrate in kbps (default: 128) |
+| `--video-stream <INDEX>` | Select video stream by index |
+| `--audio-stream <INDEX>` | Select audio stream by index |
+| `--no-video` | Disable video output |
+| `--no-audio` | Disable audio output |
+| `--progress` | Show progress during transcoding |
+
+*H.264 requires the `gpl-x264` feature (GPL license).
+**AAC requires the `fdk-aac` feature.
+
+#### Container Format Constraints
+
+| Output Format | Supported Video Codecs | Supported Audio Codecs |
+|---------------|------------------------|------------------------|
+| WebM | VP8, VP9 | Opus, Vorbis |
+| MP4 | H.264, VP9 | AAC, Opus |
+| WAV | (none) | PCM |
+
+#### Examples
+
+**Transcode VP9 to VP8:**
+```
+$ rust_media transform video.webm output.webm -v vp8 -a copy --progress
+Input:  video.webm (webm)
+Output: output.webm (webm)
+Video:  Stream #0 (vp9) -> vp8
+Audio:  Stream #1 (opus) -> opus
+Progress: 75.5% (45.2s elapsed)
+
+Processed 1500 packets, 750 frames in 45.20s
+Transcoding complete!
+```
+
+**Extract audio to WAV:**
+```
+$ rust_media transform video.webm audio.wav -a pcm --no-video
+Input:  video.webm (webm)
+Output: audio.wav (wav)
+Audio:  Stream #1 (opus) -> pcm
+
+Processed 500 packets, 500 frames in 0.50s
+Transcoding complete!
+```
+
+**Remux WebM to WebM (copy streams):**
+```
+$ rust_media transform input.webm output.webm -v copy -a copy
+Input:  input.webm (webm)
+Output: output.webm (webm)
+Video:  Stream #0 (vp9) -> vp9
+Audio:  Stream #1 (opus) -> opus
+
+Processed 1500 packets, 0 frames in 0.05s
+Transcoding complete!
+```
+
+## Comparison with ffmpeg
+
+### Feature Comparison
+
+| Feature | rust_media transform | ffmpeg |
+|---------|---------------------|--------|
+| Video transcoding | ✅ (VP8, VP9, H.264*) | ✅ (many codecs) |
+| Audio transcoding | ✅ (Opus, AAC**, PCM) | ✅ (many codecs) |
+| Stream copying | ✅ | ✅ |
+| Bitrate control | ✅ | ✅ |
+| Two-pass encoding | ❌ | ✅ |
+| Filters (scale, crop) | ❌ | ✅ |
+| Subtitle handling | ❌ | ✅ |
+| Multiple outputs | ❌ | ✅ |
+| Seeking/trimming | ❌ | ✅ |
+| Network streams | ❌ | ✅ |
+
+*Requires `gpl-x264` feature. **Requires `fdk-aac` feature.
+
+### Equivalent Commands
+
+| Task | rust_media | ffmpeg |
+|------|------------|--------|
+| Copy streams | `rust_media transform in.webm out.webm -v copy -a copy` | `ffmpeg -i in.webm -c copy out.webm` |
+| Transcode video | `rust_media transform in.webm out.webm -v vp8` | `ffmpeg -i in.webm -c:v libvpx out.webm` |
+| Set video bitrate | `rust_media transform in.webm out.webm -v vp8 --video-bitrate 2000` | `ffmpeg -i in.webm -c:v libvpx -b:v 2000k out.webm` |
+| Extract audio | `rust_media transform in.webm out.wav -a pcm --no-video` | `ffmpeg -i in.webm -vn -c:a pcm_s16le out.wav` |
+| Video only | `rust_media transform in.webm out.webm -v copy --no-audio` | `ffmpeg -i in.webm -an -c:v copy out.webm` |
+
 ## Supported Formats
 
 | Format | Extensions | Codecs |
