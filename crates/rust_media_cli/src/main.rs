@@ -1174,6 +1174,9 @@ fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
         "vp9" => rust_media_codec::Vp9Decoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "h264" | "avc" => rust_media_codec::H264Decoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
         #[cfg(feature = "fdk-aac")]
         "aac" => rust_media_codec::FdkAacDecoder::new(stream.clone())
             .ok()
