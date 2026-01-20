@@ -13,7 +13,7 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 ### Default (MIT License)
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
-- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), AV1 (dav1d, rav1e/BSD-MIT)
+- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (OpenH264/BSD-2-Clause), AV1 (dav1d, rav1e/BSD-MIT)
 - **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), Vorbis (libvorbis/BSD), FLAC (libflac/BSD)
 
 ### Optional GPL Features
@@ -42,7 +42,7 @@ x264 = { version = "...", optional = true }
 | VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | AV1 | dav1d/rav1e | BSD/MIT | *(default)* | Planned |
-| H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | Planned |
+| H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | ✅ Implemented |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
 | H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
@@ -94,7 +94,7 @@ rust_media/
 │   │   └── MKV demuxer/muxer (planned)
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (encoder, gpl-x264), AV1 (planned)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (decoder via OpenH264, encoder via x264), AV1 (planned)
 │   │   └── Audio: PCM ✅, Opus ✅, AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)
@@ -212,8 +212,8 @@ Both structures support:
   - Example: WebM container can hold VP8, VP9, or AV1 video streams with Opus or Vorbis audio
 
 - **Codecs** (handled by decoders/encoders):
-  - **Video codecs**: VP8 ✅, VP9 ✅, H.264 ✅ (encoder), H.265/HEVC, AV1, MPEG-4, MPEG-2
-  - **Audio codecs**: PCM ✅, Opus ✅, AAC ✅ (encoder), MP3, Vorbis, FLAC
+  - **Video codecs**: VP8 ✅, VP9 ✅, H.264 ✅ (decoder + encoder), H.265/HEVC, AV1, MPEG-4, MPEG-2
+  - **Audio codecs**: PCM ✅, Opus ✅, AAC ✅ (decoder + encoder), MP3, Vorbis, FLAC
   - **Image codecs**: JPEG, PNG, HEIC, AVIF
   - A decoder takes Packets and produces Frames
   - An encoder takes Frames and produces Packets
@@ -262,16 +262,21 @@ Build comprehensive testing infrastructure including:
   - Decoder: Fully functional with YUV420P (I420) output
   - Encoder: Functional with limited configuration options (see limitations below)
   - See `crates/rust_media_codec/examples/test_vp8_codec.rs` for decode/encode roundtrip example
-- ✅ **H.264/AVC** (encoder) **IMPLEMENTED** in `rust_media_codec/src/video/x264.rs`
-  - **Encoder**: x264 (GPL v2+) - requires `gpl-x264` feature flag
-  - **Decoder**: OpenH264 (BSD-2-Clause) - planned, will be default/MIT-compatible
-  - Uses x264 crate (v0.5.0) - safe Rust bindings to libx264
-  - Requires system libx264 (`brew install x264` or `apt-get install libx264-dev`)
-  - Profile: High (maximum quality/features)
-  - Preset: Medium (balanced speed/quality)
-  - Annex B output format for muxer compatibility
-  - Full B-frame support with proper flush handling
-  - Build with: `cargo build --features gpl-x264`
+- ✅ **H.264/AVC** (decoder + encoder) **IMPLEMENTED**
+  - **Decoder**: OpenH264 (BSD-2-Clause) in `rust_media_codec/src/video/openh264.rs`
+    - Uses openh264 crate (v0.6.x) - safe Rust bindings to OpenH264
+    - OpenH264 is bundled/compiled automatically via openh264-sys2
+    - YUV420P (I420) output format
+    - BSD-2-Clause licensed - default, MIT-compatible
+  - **Encoder**: x264 (GPL v2+) in `rust_media_codec/src/video/x264.rs`
+    - Requires `gpl-x264` feature flag
+    - Uses x264 crate (v0.5.0) - safe Rust bindings to libx264
+    - Requires system libx264 (`brew install x264` or `apt-get install libx264-dev`)
+    - Profile: High (maximum quality/features)
+    - Preset: Medium (balanced speed/quality)
+    - Annex B output format for muxer compatibility
+    - Full B-frame support with proper flush handling
+    - Build with: `cargo build --features gpl-x264`
 - ✅ **VP9**: Google's successor to VP8 **IMPLEMENTED** in `rust_media_codec/src/video/vp9.rs`
   - Uses libvpx via vpx-rs bindings (version 0.2.1)
   - Decoder: Fully functional with YUV420P (I420) output, 16-bit support planned

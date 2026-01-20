@@ -5,6 +5,7 @@
 //! # Video Codecs
 //! - **VP8** - ✅ Implemented (via libvpx)
 //! - **VP9** - ✅ Implemented (via libvpx)
+//! - **H.264/AVC** - ✅ Decoder implemented (via OpenH264, BSD-2-Clause)
 //! - **H.264/AVC** - ✅ Encoder implemented (via x264, requires `gpl-x264` feature)
 //! - AV1 (planned)
 //! - H.265/HEVC (future)
@@ -34,6 +35,7 @@ pub mod video;
 // Re-export commonly used codecs
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
+pub use video::openh264::H264Decoder;
 pub use video::vp8::{Vp8Decoder, Vp8Encoder};
 pub use video::vp9::{Vp9Decoder, Vp9Encoder};
 
