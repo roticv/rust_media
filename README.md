@@ -96,10 +96,12 @@ This project is in active development. Current status:
 - ✅ **Opus** codec (decoder + encoder)
 - ✅ **VP8** codec (decoder + encoder via libvpx)
 - ✅ **VP9** codec (decoder + encoder via libvpx)
-- ✅ **H.264** decoder (via OpenH264, BSD-2-Clause)
+- ✅ **H.264** decoder (via OpenH264, BSD-2-Clause) - *Constrained Baseline Profile only*
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
 - ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
 - 📋 AV1 codec - Planned
+
+**Note**: The H.264 decoder uses OpenH264 which only supports Constrained Baseline Profile. Videos encoded with Main or High Profile will not decode. For broader H.264 support, consider using FFmpeg.
 
 ### CLI Tool
 - ✅ **info** - Analyze media files (similar to ffprobe)

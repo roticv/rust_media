@@ -268,6 +268,9 @@ Build comprehensive testing infrastructure including:
     - OpenH264 is bundled/compiled automatically via openh264-sys2
     - YUV420P (I420) output format
     - BSD-2-Clause licensed - default, MIT-compatible
+    - **Limitation**: Only supports **Constrained Baseline Profile** up to Level 5.2
+    - Does NOT support Main Profile or High Profile (most commercial H.264 content)
+    - For broader profile support, consider FFmpeg's libavcodec or hardware decoders
   - **Encoder**: x264 (GPL v2+) in `rust_media_codec/src/video/x264.rs`
     - Requires `gpl-x264` feature flag
     - Uses x264 crate (v0.5.0) - safe Rust bindings to libx264

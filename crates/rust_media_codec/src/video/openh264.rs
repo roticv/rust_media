@@ -7,13 +7,32 @@
 //! OpenH264 is licensed under BSD-2-Clause, making it compatible with the project's
 //! MIT/Apache-2.0 default license. No special feature flags are required.
 //!
+//! # Profile Support Limitation
+//!
+//! **Important**: OpenH264 only supports **Constrained Baseline Profile** up to Level 5.2.
+//! It does NOT support Main Profile or High Profile.
+//!
+//! Most H.264 videos use High Profile for better compression. Videos encoded with
+//! Main or High profile will fail to decode with this decoder.
+//!
+//! | Profile | Supported |
+//! |---------|-----------|
+//! | Constrained Baseline | ✅ |
+//! | Baseline | ❌ |
+//! | Main | ❌ |
+//! | High | ❌ |
+//!
+//! For High Profile support, consider using FFmpeg's libavcodec or hardware decoders.
+//!
 //! # Current Implementation Status
 //!
 //! ## Decoder
-//! - ✅ Fully implemented with YUV420P (I420) output
+//! - ✅ Constrained Baseline Profile decoding with YUV420P (I420) output
 //! - ✅ Supports both AVCC format (MP4) and Annex B format (raw H.264)
 //! - ✅ Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
 //! - ✅ Proper flush handling for B-frames and buffered data
+//! - ❌ Main Profile not supported
+//! - ❌ High Profile not supported
 //!
 //! # Example
 //!
@@ -43,6 +62,12 @@ const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 ///
 /// Decodes H.264-compressed video packets into raw YUV frames.
 ///
+/// # Profile Limitation
+///
+/// **Warning**: This decoder only supports **Constrained Baseline Profile**.
+/// Videos encoded with Main Profile or High Profile will fail to decode.
+/// Most commercial H.264 content uses High Profile.
+///
 /// # MP4 Support
 ///
 /// This decoder automatically handles H.264 data from MP4 containers:
@@ -55,6 +80,7 @@ const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 /// - Input packets can be in AVCC format (MP4) or Annex B format (raw H.264)
 /// - Output is always YUV420P (I420) format
 /// - The decoder handles B-frames internally; use `flush()` to retrieve buffered frames
+/// - Only Constrained Baseline Profile is supported (OpenH264 limitation)
 pub struct H264Decoder {
     stream_info: StreamInfo,
     decoder: OpenH264DecoderInternal,
