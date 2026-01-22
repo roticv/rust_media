@@ -42,7 +42,8 @@ x264 = { version = "...", optional = true }
 | VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | AV1 | dav1d/rav1e | BSD/MIT | *(default)* | Planned |
-| H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | ✅ Implemented |
+| H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | ✅ Implemented (Baseline only) |
+| H.264 (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (all profiles, macOS) |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
 | H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
@@ -94,7 +95,7 @@ rust_media/
 │   │   └── MKV demuxer/muxer (planned)
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (decoder via OpenH264, encoder via x264), AV1 (planned)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (OpenH264/VideoToolbox decode, x264 encode), AV1 (planned)
 │   │   └── Audio: PCM ✅, Opus ✅, AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations (planned)

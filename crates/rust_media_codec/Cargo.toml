@@ -13,6 +13,8 @@ default = []
 gpl-x264 = ["x264"]
 # FDK-AAC feature - Fraunhofer FDK AAC Codec License (not GPL, but has some restrictions)
 fdk-aac = ["dep:fdk-aac"]
+# VideoToolbox hardware acceleration (macOS only)
+videotoolbox = []
 
 [dependencies]
 rust_media_core = { workspace = true }
@@ -24,6 +26,15 @@ openh264 = { version = "0.6", features = ["source"] }
 x264 = { version = "0.5", optional = true }
 # FDK-AAC - Fraunhofer FDK AAC Codec License
 fdk-aac = { version = "0.7", optional = true }
+
+# VideoToolbox dependencies (macOS only)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSDictionary", "NSValue"] }
+objc2-core-foundation = "0.3"
+objc2-core-media = { version = "0.3", features = ["CMFormatDescription", "CMSampleBuffer", "CMBlockBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer"] }
+objc2-video-toolbox = { version = "0.3", features = ["VTDecompressionSession", "VTSession", "VTDecompressionProperties"] }
 
 [dev-dependencies]
 rust_media_format = { workspace = true }

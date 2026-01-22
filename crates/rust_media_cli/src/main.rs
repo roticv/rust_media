@@ -1174,9 +1174,20 @@ fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
         "vp9" => rust_media_codec::Vp9Decoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
-        "h264" | "avc" => rust_media_codec::H264Decoder::new(stream.clone())
-            .ok()
-            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "h264" | "avc" => {
+            // On macOS with videotoolbox feature, try VideoToolbox first (hardware acceleration + all profiles)
+            // Falls back to OpenH264 if VideoToolbox fails
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            {
+                if let Ok(decoder) = rust_media_codec::VideoToolboxH264Decoder::new(stream.clone()) {
+                    return Some(Box::new(decoder) as Box<dyn DecoderWrapper>);
+                }
+            }
+            // Fall back to OpenH264 (Constrained Baseline only)
+            rust_media_codec::H264Decoder::new(stream.clone())
+                .ok()
+                .map(|d| Box::new(d) as Box<dyn DecoderWrapper>)
+        }
         #[cfg(feature = "fdk-aac")]
         "aac" => rust_media_codec::FdkAacDecoder::new(stream.clone())
             .ok()

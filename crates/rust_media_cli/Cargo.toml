@@ -27,3 +27,4 @@ serde_json = "1"
 default = []
 fdk-aac = ["rust_media_codec/fdk-aac"]
 gpl-x264 = ["rust_media_codec/gpl-x264"]
+videotoolbox = ["rust_media_codec/videotoolbox"]

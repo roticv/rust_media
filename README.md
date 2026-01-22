@@ -97,11 +97,12 @@ This project is in active development. Current status:
 - ✅ **VP8** codec (decoder + encoder via libvpx)
 - ✅ **VP9** codec (decoder + encoder via libvpx)
 - ✅ **H.264** decoder (via OpenH264, BSD-2-Clause) - *Constrained Baseline Profile only*
+- ✅ **H.264** decoder (via VideoToolbox, requires `videotoolbox` feature) - *All profiles, macOS only*
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
 - ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
 - 📋 AV1 codec - Planned
 
-**Note**: The H.264 decoder uses OpenH264 which only supports Constrained Baseline Profile. Videos encoded with Main or High Profile will not decode. For broader H.264 support, consider using FFmpeg.
+**Note**: The default H.264 decoder uses OpenH264 which only supports Constrained Baseline Profile. For Main or High Profile content (common in commercial videos), enable the `videotoolbox` feature on macOS for hardware-accelerated decoding of all profiles.
 
 ### CLI Tool
 - ✅ **info** - Analyze media files (similar to ffprobe)
@@ -123,14 +124,17 @@ This project is in active development. Current status:
 
 Some codecs require external libraries with specific licensing and are available through optional Cargo features:
 
-| Feature | Codec | Library | License |
-|---------|-------|---------|---------|
-| `gpl-x264` | H.264 encoder | x264 | GPL v2+ |
-| `fdk-aac` | AAC encoder + decoder | libfdk-aac | Fraunhofer FDK AAC License |
+| Feature | Codec | Library | License | Platform |
+|---------|-------|---------|---------|----------|
+| `gpl-x264` | H.264 encoder | x264 | GPL v2+ | All |
+| `fdk-aac` | AAC encoder + decoder | libfdk-aac | Fraunhofer FDK AAC License | All |
+| `videotoolbox` | H.264 decoder (all profiles) | VideoToolbox | Apple | macOS only |
 
 **Warning**: Enabling `gpl-x264` changes the license of compiled binaries to GPL.
 
 **Note**: The `fdk-aac` feature uses the Fraunhofer FDK AAC License, which is more permissive than GPL but has some restrictions on use.
+
+**Note**: The `videotoolbox` feature enables hardware-accelerated H.264 decoding on macOS with support for all H.264 profiles (Baseline, Main, High). This is recommended over OpenH264 for commercial content.
 
 ```bash
 # Build with H.264 encoder support (GPL)
@@ -138,6 +142,9 @@ cargo build --features gpl-x264
 
 # Build with AAC encoder support
 cargo build --features fdk-aac
+
+# Build with VideoToolbox H.264 decoder (macOS, all profiles)
+cargo build --features videotoolbox
 
 # Build with both video and audio encoding
 cargo build --features "gpl-x264 fdk-aac"

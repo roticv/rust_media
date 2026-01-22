@@ -5,7 +5,8 @@
 //! # Video Codecs
 //! - **VP8** - ✅ Implemented (via libvpx)
 //! - **VP9** - ✅ Implemented (via libvpx)
-//! - **H.264/AVC** - ✅ Decoder implemented (via OpenH264, BSD-2-Clause)
+//! - **H.264/AVC** - ✅ Decoder implemented (via OpenH264, BSD-2-Clause) - Constrained Baseline only
+//! - **H.264/AVC** - ✅ Decoder implemented (via VideoToolbox, macOS only) - All profiles
 //! - **H.264/AVC** - ✅ Encoder implemented (via x264, requires `gpl-x264` feature)
 //! - AV1 (planned)
 //! - H.265/HEVC (future)
@@ -26,6 +27,7 @@
 //!
 //! - `gpl-x264`: Enables H.264 encoding via x264 (GPL v2+)
 //! - `fdk-aac`: Enables AAC encoding and decoding via libfdk-aac (Fraunhofer FDK AAC License)
+//! - `videotoolbox`: Enables hardware-accelerated H.264 decoding on macOS (all profiles)
 //!
 //! **Warning**: Enabling `gpl-x264` changes the license of compiled binaries to GPL.
 
@@ -45,6 +47,10 @@ pub use video::x264::X264Encoder;
 
 #[cfg(feature = "fdk-aac")]
 pub use audio::fdk_aac::{FdkAacDecoder, FdkAacEncoder};
+
+// VideoToolbox hardware acceleration (macOS only)
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use video::videotoolbox::VideoToolboxH264Decoder;
 
 #[cfg(test)]
 mod tests {
