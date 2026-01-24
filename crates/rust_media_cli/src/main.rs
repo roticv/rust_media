@@ -97,6 +97,20 @@ enum Commands {
         /// Show progress during transcoding
         #[arg(long)]
         progress: bool,
+
+        /// Video filter graph (e.g., "ssim=reference=ref.mp4")
+        ///
+        /// Filters are specified as: filter_name=param1=value1:param2=value2
+        /// Multiple filters can be chained with commas: filter1,filter2
+        ///
+        /// Available filters:
+        ///   ssim - Compute SSIM between input and reference video
+        ///     Parameters:
+        ///       reference=<file>  - Reference video file path (required)
+        ///       stats_file=<file> - Output stats to file (optional)
+        ///       print_per_frame   - Print per-frame SSIM values (optional)
+        #[arg(long = "vf", visible_alias = "video-filter")]
+        video_filter: Option<String>,
     },
 }
 
@@ -221,6 +235,333 @@ enum FrameParamsJson {
 }
 
 // ============================================================================
+// Video Filter Graph
+// ============================================================================
+
+/// Parsed video filter with name and parameters
+#[derive(Debug, Clone)]
+struct VideoFilter {
+    name: String,
+    params: std::collections::HashMap<String, String>,
+}
+
+/// Filter graph containing a chain of video filters
+#[derive(Debug, Clone)]
+struct FilterGraph {
+    filters: Vec<VideoFilter>,
+}
+
+impl FilterGraph {
+    /// Parse a filter graph string in FFmpeg-like format
+    /// Format: "filter1=param1=value1:param2=value2,filter2=param=value"
+    fn parse(filter_str: &str) -> Result<Self, String> {
+        let mut filters = Vec::new();
+
+        for filter_spec in filter_str.split(',') {
+            let filter_spec = filter_spec.trim();
+            if filter_spec.is_empty() {
+                continue;
+            }
+
+            let filter = VideoFilter::parse(filter_spec)?;
+            filters.push(filter);
+        }
+
+        if filters.is_empty() {
+            return Err("No filters specified".to_string());
+        }
+
+        Ok(FilterGraph { filters })
+    }
+}
+
+impl VideoFilter {
+    /// Parse a single filter specification
+    /// Format: "filter_name=param1=value1:param2=value2" or "filter_name"
+    fn parse(spec: &str) -> Result<Self, String> {
+        let mut parts = spec.splitn(2, '=');
+        let name = parts.next().unwrap_or("").trim().to_string();
+
+        if name.is_empty() {
+            return Err("Filter name is empty".to_string());
+        }
+
+        let mut params = std::collections::HashMap::new();
+
+        if let Some(params_str) = parts.next() {
+            // Parse key=value pairs separated by colons
+            // Handle the case where the first part after filter name might be a positional arg
+            let param_parts: Vec<&str> = params_str.split(':').collect();
+
+            for (i, part) in param_parts.iter().enumerate() {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+
+                if let Some((key, value)) = part.split_once('=') {
+                    params.insert(key.trim().to_string(), value.trim().to_string());
+                } else if i == 0 {
+                    // First positional argument - for SSIM this would be reference file
+                    params.insert("reference".to_string(), part.to_string());
+                } else {
+                    // Flag-style parameter (e.g., "print_per_frame")
+                    params.insert(part.to_string(), "true".to_string());
+                }
+            }
+        }
+
+        Ok(VideoFilter { name, params })
+    }
+
+    /// Get a parameter value
+    fn get_param(&self, key: &str) -> Option<&str> {
+        self.params.get(key).map(|s| s.as_str())
+    }
+
+    /// Check if a flag parameter is set
+    fn has_flag(&self, key: &str) -> bool {
+        self.params.get(key).map(|v| v == "true" || v == "1").unwrap_or(false)
+    }
+}
+
+// ============================================================================
+// SSIM data structures
+// ============================================================================
+
+#[derive(Serialize)]
+struct SsimResult {
+    reference: String,
+    distorted: String,
+    width: usize,
+    height: usize,
+    frame_count: usize,
+    ssim_y: f64,
+    ssim_u: f64,
+    ssim_v: f64,
+    ssim_avg: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    frames: Vec<SsimFrameResult>,
+}
+
+#[derive(Serialize, Clone)]
+struct SsimFrameResult {
+    frame_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pts: Option<i64>,
+    ssim_y: f64,
+    ssim_u: f64,
+    ssim_v: f64,
+    ssim_avg: f64,
+}
+
+/// SSIM filter context - holds state during filtering
+struct SsimFilterContext {
+    reference_path: PathBuf,
+    stats_file: Option<PathBuf>,
+    print_per_frame: bool,
+    // Runtime state
+    ref_demuxer: Option<Box<dyn Demuxer>>,
+    ref_decoder: Option<Box<dyn DecoderWrapper>>,
+    ref_stream_idx: usize,
+    ref_frames: std::collections::VecDeque<Frame>,
+    ref_eof: bool,
+    // Results
+    frame_results: Vec<SsimFrameResult>,
+    total_ssim_y: f64,
+    total_ssim_u: f64,
+    total_ssim_v: f64,
+    total_ssim_avg: f64,
+    frame_count: usize,
+    width: usize,
+    height: usize,
+}
+
+impl SsimFilterContext {
+    fn new(filter: &VideoFilter) -> Result<Self, Box<dyn std::error::Error>> {
+        let reference_path = filter.get_param("reference")
+            .ok_or("SSIM filter requires 'reference' parameter")?;
+
+        let stats_file = filter.get_param("stats_file").map(PathBuf::from);
+        let print_per_frame = filter.has_flag("print_per_frame");
+
+        Ok(SsimFilterContext {
+            reference_path: PathBuf::from(reference_path),
+            stats_file,
+            print_per_frame,
+            ref_demuxer: None,
+            ref_decoder: None,
+            ref_stream_idx: 0,
+            ref_frames: std::collections::VecDeque::new(),
+            ref_eof: false,
+            frame_results: Vec::new(),
+            total_ssim_y: 0.0,
+            total_ssim_u: 0.0,
+            total_ssim_v: 0.0,
+            total_ssim_avg: 0.0,
+            frame_count: 0,
+            width: 0,
+            height: 0,
+        })
+    }
+
+    fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Open reference demuxer
+        let ref_demuxer = open_demuxer_for_ssim(&self.reference_path)?;
+        let ref_streams = ref_demuxer.streams()?;
+
+        // Find video stream
+        let ref_video = find_video_stream(&ref_streams, None)
+            .ok_or("No video stream found in reference file")?;
+
+        self.ref_stream_idx = ref_video.index;
+
+        // Get dimensions
+        if let StreamParams::Video(params) = &ref_video.params {
+            self.width = params.width;
+            self.height = params.height;
+        }
+
+        // Create decoder
+        let ref_decoder = create_decoder_for_stream(ref_video)?;
+
+        self.ref_demuxer = Some(ref_demuxer);
+        self.ref_decoder = Some(ref_decoder);
+
+        Ok(())
+    }
+
+    fn process_frame(&mut self, input_frame: &Frame) -> Result<(), Box<dyn std::error::Error>> {
+        // Initialize on first frame if needed
+        if self.ref_demuxer.is_none() {
+            self.initialize()?;
+        }
+
+        // Get reference frame
+        let ref_frame = self.get_next_reference_frame()?;
+
+        // Calculate SSIM
+        match calculate_frame_ssim(input_frame, &ref_frame) {
+            Ok((ssim_y, ssim_u, ssim_v, ssim_avg)) => {
+                self.total_ssim_y += ssim_y;
+                self.total_ssim_u += ssim_u;
+                self.total_ssim_v += ssim_v;
+                self.total_ssim_avg += ssim_avg;
+
+                let frame_result = SsimFrameResult {
+                    frame_index: self.frame_count,
+                    pts: input_frame.pts(),
+                    ssim_y,
+                    ssim_u,
+                    ssim_v,
+                    ssim_avg,
+                };
+
+                if self.print_per_frame {
+                    eprintln!(
+                        "[SSIM] Frame {:>5}: Y={:.6} U={:.6} V={:.6} All={:.6} ({:.2} dB)",
+                        self.frame_count, ssim_y, ssim_u, ssim_v, ssim_avg, ssim_to_db(ssim_avg)
+                    );
+                }
+
+                self.frame_results.push(frame_result);
+                self.frame_count += 1;
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to calculate SSIM for frame {}: {}", self.frame_count, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_next_reference_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error>> {
+        // Try to get a buffered frame first
+        if let Some(frame) = self.ref_frames.pop_front() {
+            return Ok(frame);
+        }
+
+        let demuxer = self.ref_demuxer.as_mut().ok_or("Reference demuxer not initialized")?;
+        let decoder = self.ref_decoder.as_mut().ok_or("Reference decoder not initialized")?;
+
+        // Decode frames until we get one
+        loop {
+            if self.ref_eof {
+                return Err("Reference video ended before input".into());
+            }
+
+            // Try to receive a frame
+            match decoder.receive_frame() {
+                Ok(frame) => return Ok(frame),
+                Err(_) => {}
+            }
+
+            // Read packets until we get a frame
+            match demuxer.read_packet() {
+                Ok(packet) => {
+                    if packet.stream_index() != self.ref_stream_idx {
+                        continue;
+                    }
+                    let _ = decoder.send_packet(&packet);
+                }
+                Err(_) => {
+                    self.ref_eof = true;
+                    let _ = decoder.flush();
+
+                    // Try one more receive after flush
+                    match decoder.receive_frame() {
+                        Ok(frame) => return Ok(frame),
+                        Err(_) => return Err("Reference video ended before input".into()),
+                    }
+                }
+            }
+        }
+    }
+
+    fn finalize(&self) -> SsimResult {
+        let avg_ssim_y = if self.frame_count > 0 { self.total_ssim_y / self.frame_count as f64 } else { 0.0 };
+        let avg_ssim_u = if self.frame_count > 0 { self.total_ssim_u / self.frame_count as f64 } else { 0.0 };
+        let avg_ssim_v = if self.frame_count > 0 { self.total_ssim_v / self.frame_count as f64 } else { 0.0 };
+        let avg_ssim_avg = if self.frame_count > 0 { self.total_ssim_avg / self.frame_count as f64 } else { 0.0 };
+
+        SsimResult {
+            reference: self.reference_path.display().to_string(),
+            distorted: "input".to_string(),
+            width: self.width,
+            height: self.height,
+            frame_count: self.frame_count,
+            ssim_y: avg_ssim_y,
+            ssim_u: avg_ssim_u,
+            ssim_v: avg_ssim_v,
+            ssim_avg: avg_ssim_avg,
+            frames: self.frame_results.clone(),
+        }
+    }
+
+    fn print_summary(&self) {
+        let result = self.finalize();
+        eprintln!();
+        eprintln!("SSIM Summary:");
+        eprintln!("  Reference: {}", result.reference);
+        eprintln!("  Frames:    {}", result.frame_count);
+        eprintln!("  Y:   {:.6} ({:.2} dB)", result.ssim_y, ssim_to_db(result.ssim_y));
+        eprintln!("  U:   {:.6} ({:.2} dB)", result.ssim_u, ssim_to_db(result.ssim_u));
+        eprintln!("  V:   {:.6} ({:.2} dB)", result.ssim_v, ssim_to_db(result.ssim_v));
+        eprintln!("  All: {:.6} ({:.2} dB)", result.ssim_avg, ssim_to_db(result.ssim_avg));
+    }
+
+    fn write_stats_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(stats_path) = &self.stats_file {
+            let result = self.finalize();
+            let json = serde_json::to_string_pretty(&result)?;
+            std::fs::write(stats_path, json)?;
+            eprintln!("SSIM stats written to: {}", stats_path.display());
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -255,6 +596,7 @@ fn main() {
             no_video,
             no_audio,
             progress,
+            video_filter,
         } => {
             if let Err(e) = run_transform(
                 &input,
@@ -268,6 +610,7 @@ fn main() {
                 no_video,
                 no_audio,
                 progress,
+                video_filter.as_deref(),
             ) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -293,6 +636,7 @@ fn run_transform(
     no_video: bool,
     no_audio: bool,
     progress: bool,
+    video_filter: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input_filename = input.to_string_lossy().to_string();
     let output_filename = output.to_string_lossy().to_string();
@@ -402,6 +746,31 @@ fn run_transform(
 
     println!();
 
+    // Parse video filter graph and create filter context
+    let mut ssim_filter: Option<SsimFilterContext> = None;
+
+    if let Some(filter_str) = video_filter {
+        let filter_graph = FilterGraph::parse(filter_str)
+            .map_err(|e| format!("Failed to parse filter graph: {}", e))?;
+
+        // Process filters
+        for filter in &filter_graph.filters {
+            match filter.name.as_str() {
+                "ssim" => {
+                    if video_codec == "copy" {
+                        return Err("SSIM filter requires video transcoding (cannot use with -v copy)".into());
+                    }
+                    println!("Filter: SSIM comparison with reference={}",
+                             filter.get_param("reference").unwrap_or("?"));
+                    ssim_filter = Some(SsimFilterContext::new(filter)?);
+                }
+                _ => {
+                    return Err(format!("Unknown video filter: {}", filter.name).into());
+                }
+            }
+        }
+    }
+
     // Perform the actual transcoding
     match output_ext.as_str() {
         "mp4" | "m4a" | "m4v" | "mov" => {
@@ -417,6 +786,7 @@ fn run_transform(
                 audio_bitrate,
                 duration,
                 progress,
+                &mut ssim_filter,
             )?;
         }
         "webm" => {
@@ -432,6 +802,7 @@ fn run_transform(
                 audio_bitrate,
                 duration,
                 progress,
+                &mut ssim_filter,
             )?;
         }
         "wav" => {
@@ -448,6 +819,12 @@ fn run_transform(
         _ => {
             return Err(format!("Unsupported output format: {}", output_ext).into());
         }
+    }
+
+    // Print SSIM summary if filter was used
+    if let Some(ref filter) = ssim_filter {
+        filter.print_summary();
+        filter.write_stats_file()?;
     }
 
     println!("Transcoding complete!");
@@ -471,6 +848,7 @@ fn transcode_to_mp4(
     audio_bitrate: u64,
     duration: Option<i64>,
     progress: bool,
+    ssim_filter: &mut Option<SsimFilterContext>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let mut writer = BufWriter::new(output_file);
@@ -545,6 +923,7 @@ fn transcode_to_mp4(
         audio_bitrate,
         duration,
         progress,
+        ssim_filter,
     )?;
 
     muxer.write_trailer()?;
@@ -570,6 +949,7 @@ fn transcode_to_webm(
     audio_bitrate: u64,
     duration: Option<i64>,
     progress: bool,
+    ssim_filter: &mut Option<SsimFilterContext>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let writer = BufWriter::new(output_file);
@@ -655,6 +1035,7 @@ fn transcode_to_webm(
         audio_bitrate,
         duration,
         progress,
+        ssim_filter,
     )?;
 
     muxer.write_trailer()?;
@@ -835,6 +1216,7 @@ fn run_transcode_pipeline<M: Muxer>(
     audio_bitrate: u64,
     duration: Option<i64>,
     progress: bool,
+    ssim_filter: &mut Option<SsimFilterContext>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create decoders and encoders
     let mut video_decoder: Option<Box<dyn DecoderWrapper>> = None;
@@ -890,6 +1272,7 @@ fn run_transcode_pipeline<M: Muxer>(
                 &mut packet_count,
                 &mut frame_count,
                 start_time,
+                ssim_filter,
             )?;
         }
         "webm" => {
@@ -915,6 +1298,7 @@ fn run_transcode_pipeline<M: Muxer>(
                 &mut packet_count,
                 &mut frame_count,
                 start_time,
+                ssim_filter,
             )?;
         }
         "wav" => {
@@ -940,6 +1324,7 @@ fn run_transcode_pipeline<M: Muxer>(
                 &mut packet_count,
                 &mut frame_count,
                 start_time,
+                ssim_filter,
             )?;
         }
         _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
@@ -960,6 +1345,7 @@ fn run_transcode_pipeline<M: Muxer>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn process_packets<D: Demuxer, M: Muxer>(
     demuxer: &mut D,
     muxer: &mut M,
@@ -978,6 +1364,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
     packet_count: &mut usize,
     frame_count: &mut usize,
     start_time: std::time::Instant,
+    ssim_filter: &mut Option<SsimFilterContext>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match demuxer.read_packet() {
@@ -1000,6 +1387,14 @@ fn process_packets<D: Demuxer, M: Muxer>(
                             decoder.send_packet(&packet)?;
                             while let Ok(frame) = decoder.receive_frame() {
                                 *frame_count += 1;
+
+                                // Process SSIM filter if enabled
+                                if let Some(filter) = ssim_filter.as_mut() {
+                                    if let Err(e) = filter.process_frame(&frame) {
+                                        eprintln!("Warning: SSIM filter error: {}", e);
+                                    }
+                                }
+
                                 encoder.send_frame(&frame)?;
                                 while let Ok(mut enc_packet) = encoder.receive_packet() {
                                     enc_packet.set_stream_index(out_idx);
@@ -1048,6 +1443,13 @@ fn process_packets<D: Demuxer, M: Muxer>(
     if let (Some(decoder), Some(encoder)) = (video_decoder.as_mut(), video_encoder.as_mut()) {
         decoder.flush()?;
         while let Ok(frame) = decoder.receive_frame() {
+            // Process SSIM filter if enabled
+            if let Some(filter) = ssim_filter.as_mut() {
+                if let Err(e) = filter.process_frame(&frame) {
+                    eprintln!("Warning: SSIM filter error during flush: {}", e);
+                }
+            }
+
             encoder.send_frame(&frame)?;
             while let Ok(mut enc_packet) = encoder.receive_packet() {
                 if let Some(out_idx) = video_out_idx {
@@ -1845,4 +2247,164 @@ fn print_text_output(info: &MediaInfo) {
             );
         }
     }
+}
+
+// ============================================================================
+// SSIM (Structural Similarity Index) implementation
+// ============================================================================
+
+/// Constants for SSIM calculation
+const SSIM_K1: f64 = 0.01;
+const SSIM_K2: f64 = 0.03;
+const SSIM_L: f64 = 255.0; // Dynamic range for 8-bit images
+
+/// Calculate SSIM between two image planes (Y, U, or V)
+///
+/// SSIM formula:
+/// SSIM(x, y) = (2*μx*μy + C1)(2*σxy + C2) / ((μx² + μy² + C1)(σx² + σy² + C2))
+fn calculate_ssim_plane(plane1: &[u8], plane2: &[u8], width: usize, height: usize) -> f64 {
+    if plane1.len() != plane2.len() || plane1.len() != width * height {
+        return 0.0;
+    }
+
+    let n = (width * height) as f64;
+    if n == 0.0 {
+        return 1.0;
+    }
+
+    // Calculate means
+    let sum1: f64 = plane1.iter().map(|&x| x as f64).sum();
+    let sum2: f64 = plane2.iter().map(|&x| x as f64).sum();
+    let mean1 = sum1 / n;
+    let mean2 = sum2 / n;
+
+    // Calculate variances and covariance
+    let mut var1 = 0.0;
+    let mut var2 = 0.0;
+    let mut covar = 0.0;
+
+    for i in 0..plane1.len() {
+        let diff1 = plane1[i] as f64 - mean1;
+        let diff2 = plane2[i] as f64 - mean2;
+        var1 += diff1 * diff1;
+        var2 += diff2 * diff2;
+        covar += diff1 * diff2;
+    }
+
+    var1 /= n;
+    var2 /= n;
+    covar /= n;
+
+    // SSIM constants
+    let c1 = (SSIM_K1 * SSIM_L).powi(2);
+    let c2 = (SSIM_K2 * SSIM_L).powi(2);
+
+    // SSIM formula
+    let numerator = (2.0 * mean1 * mean2 + c1) * (2.0 * covar + c2);
+    let denominator = (mean1.powi(2) + mean2.powi(2) + c1) * (var1 + var2 + c2);
+
+    if denominator == 0.0 {
+        return 1.0; // Identical images
+    }
+
+    numerator / denominator
+}
+
+/// Calculate SSIM for a YUV420P frame
+/// Returns (ssim_y, ssim_u, ssim_v, ssim_avg)
+fn calculate_frame_ssim(frame1: &Frame, frame2: &Frame) -> Result<(f64, f64, f64, f64), String> {
+    // Get dimensions from video parameters
+    let params1 = frame1.video_params().ok_or("Frame 1 is not a video frame")?;
+    let params2 = frame2.video_params().ok_or("Frame 2 is not a video frame")?;
+    let (width1, height1) = (params1.width, params1.height);
+    let (width2, height2) = (params2.width, params2.height);
+
+    if width1 != width2 || height1 != height2 {
+        return Err(format!(
+            "Frame dimensions mismatch: {}x{} vs {}x{}",
+            width1, height1, width2, height2
+        ));
+    }
+
+    // Get Y plane
+    let y1 = frame1.plane(0).ok_or("Frame 1 missing Y plane")?;
+    let y2 = frame2.plane(0).ok_or("Frame 2 missing Y plane")?;
+
+    // Get U and V planes (for YUV420P, these are quarter resolution)
+    let u1 = frame1.plane(1).ok_or("Frame 1 missing U plane")?;
+    let u2 = frame2.plane(1).ok_or("Frame 2 missing U plane")?;
+    let v1 = frame1.plane(2).ok_or("Frame 1 missing V plane")?;
+    let v2 = frame2.plane(2).ok_or("Frame 2 missing V plane")?;
+
+    let uv_width = width1 / 2;
+    let uv_height = height1 / 2;
+
+    // Calculate SSIM for each plane
+    let ssim_y = calculate_ssim_plane(y1, y2, width1, height1);
+    let ssim_u = calculate_ssim_plane(u1, u2, uv_width, uv_height);
+    let ssim_v = calculate_ssim_plane(v1, v2, uv_width, uv_height);
+
+    // Weighted average (Y is more perceptually important)
+    // Common weights: Y=0.8, U=0.1, V=0.1 or Y=6, U=1, V=1
+    let ssim_avg = (6.0 * ssim_y + ssim_u + ssim_v) / 8.0;
+
+    Ok((ssim_y, ssim_u, ssim_v, ssim_avg))
+}
+
+/// Open a demuxer for the given file
+fn open_demuxer_for_ssim(
+    path: &std::path::Path,
+) -> Result<Box<dyn Demuxer>, Box<dyn std::error::Error>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "mp4" | "m4a" | "m4v" | "mov" => {
+            let file = File::open(path)?;
+            let reader = BufReader::new(file);
+            Ok(Box::new(Mp4Demuxer::new(reader)?))
+        }
+        "webm" => {
+            let file = File::open(path)?;
+            let reader = BufReader::new(file);
+            Ok(Box::new(WebmDemuxer::open(reader)?))
+        }
+        "wav" => {
+            let file = File::open(path)?;
+            let reader = BufReader::new(file);
+            Ok(Box::new(WavDemuxer::open(reader)?))
+        }
+        _ => Err(format!("Unsupported format: {}", ext).into()),
+    }
+}
+
+/// Find the first video stream in a demuxer
+fn find_video_stream(
+    streams: &[StreamInfo],
+    stream_index: Option<usize>,
+) -> Option<&StreamInfo> {
+    if let Some(idx) = stream_index {
+        streams.get(idx).filter(|s| {
+            matches!(s.params, StreamParams::Video(_))
+        })
+    } else {
+        streams.iter().find(|s| {
+            matches!(s.params, StreamParams::Video(_))
+        })
+    }
+}
+
+/// Convert SSIM to dB scale
+/// dB = -10 * log10(1 - SSIM)
+fn ssim_to_db(ssim: f64) -> f64 {
+    if ssim >= 1.0 {
+        return f64::INFINITY;
+    }
+    if ssim <= 0.0 {
+        return 0.0;
+    }
+    -10.0 * (1.0 - ssim).log10()
 }
