@@ -157,28 +157,36 @@ The `transform` command transcodes (converts) media files between different form
 
 ```bash
 # Copy video and audio streams (remux only)
-rust_media transform input.webm output.webm -v copy -a copy
+rust_media transform -i input.webm output.webm -v copy -a copy
 
 # Transcode video from VP9 to VP8
-rust_media transform input.webm output.webm -v vp8 -a copy
+rust_media transform -i input.webm output.webm -v vp8 -a copy
 
 # Extract audio to WAV
-rust_media transform input.webm output.wav -a pcm --no-video
+rust_media transform -i input.webm output.wav -a pcm --no-video
 
 # Transcode with progress display
-rust_media transform input.webm output.webm -v vp8 -a opus --progress
+rust_media transform -i input.webm output.webm -v vp8 -a opus --progress
 
 # Set video bitrate
-rust_media transform input.webm output.webm -v vp9 --video-bitrate 2000
+rust_media transform -i input.webm output.webm -v vp9 --video-bitrate 2000
 
 # Disable audio output (video only)
-rust_media transform input.webm output.webm -v copy --no-audio
+rust_media transform -i input.webm output.webm -v copy --no-audio
+
+# Compute SSIM between reference and distorted video
+rust_media transform -i reference.mp4 -i distorted.mp4 output.mp4 -v copy --vf ssim
+
+# SSIM with per-frame output and stats file
+rust_media transform -i reference.mp4 -i distorted.mp4 output.mp4 -v copy \
+  --vf "ssim=stats_file=ssim.json:print_per_frame"
 ```
 
 #### Command Options
 
 | Option | Description |
 |--------|-------------|
+| `-i, --input <FILE>` | Input media file (repeatable for multi-input filters like SSIM) |
 | `-v, --video-codec <CODEC>` | Video codec: `vp8`, `vp9`, `h264`*, `copy`, or `none` (default: `copy`) |
 | `-a, --audio-codec <CODEC>` | Audio codec: `opus`, `aac`**, `pcm`, `copy`, or `none` (default: `copy`) |
 | `--video-bitrate <KBPS>` | Video bitrate in kbps (default: 1000) |
@@ -188,9 +196,29 @@ rust_media transform input.webm output.webm -v copy --no-audio
 | `--no-video` | Disable video output |
 | `--no-audio` | Disable audio output |
 | `--progress` | Show progress during transcoding |
+| `--vf, --video-filter <FILTER>` | Video filter graph (see Video Filters below) |
 
 *H.264 requires the `gpl-x264` feature (GPL license).
 **AAC requires the `fdk-aac` feature.
+
+#### Video Filters
+
+##### `ssim` - Structural Similarity Index
+
+Computes SSIM between two video inputs. Requires two `-i` inputs:
+- Input 0 (first `-i`) is the **reference** video
+- Input 1 (second `-i`) is the **distorted** video being compared
+
+The main pipeline processes input 0 (reference). The SSIM filter internally decodes input 1 (distorted) and compares each frame pair.
+
+**Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `stats_file=<path>` | Write per-frame SSIM results to a JSON file |
+| `print_per_frame` | Print per-frame SSIM values to stderr |
+
+**Output:** Prints a summary to stderr with average SSIM for Y, U, V planes and a weighted average (All), both as SSIM values and in dB.
 
 #### Container Format Constraints
 
@@ -204,7 +232,7 @@ rust_media transform input.webm output.webm -v copy --no-audio
 
 **Transcode VP9 to VP8:**
 ```
-$ rust_media transform video.webm output.webm -v vp8 -a copy --progress
+$ rust_media transform -i video.webm output.webm -v vp8 -a copy --progress
 Input:  video.webm (webm)
 Output: output.webm (webm)
 Video:  Stream #0 (vp9) -> vp8
@@ -217,7 +245,7 @@ Transcoding complete!
 
 **Extract audio to WAV:**
 ```
-$ rust_media transform video.webm audio.wav -a pcm --no-video
+$ rust_media transform -i video.webm audio.wav -a pcm --no-video
 Input:  video.webm (webm)
 Output: audio.wav (wav)
 Audio:  Stream #1 (opus) -> pcm
@@ -228,7 +256,7 @@ Transcoding complete!
 
 **Remux WebM to WebM (copy streams):**
 ```
-$ rust_media transform input.webm output.webm -v copy -a copy
+$ rust_media transform -i input.webm output.webm -v copy -a copy
 Input:  input.webm (webm)
 Output: output.webm (webm)
 Video:  Stream #0 (vp9) -> vp9
@@ -249,7 +277,7 @@ Transcoding complete!
 | Stream copying | ✅ | ✅ |
 | Bitrate control | ✅ | ✅ |
 | Two-pass encoding | ❌ | ✅ |
-| Filters (scale, crop) | ❌ | ✅ |
+| Filters (scale, crop) | ❌ (SSIM only) | ✅ |
 | Subtitle handling | ❌ | ✅ |
 | Multiple outputs | ❌ | ✅ |
 | Seeking/trimming | ❌ | ✅ |
@@ -261,11 +289,12 @@ Transcoding complete!
 
 | Task | rust_media | ffmpeg |
 |------|------------|--------|
-| Copy streams | `rust_media transform in.webm out.webm -v copy -a copy` | `ffmpeg -i in.webm -c copy out.webm` |
-| Transcode video | `rust_media transform in.webm out.webm -v vp8` | `ffmpeg -i in.webm -c:v libvpx out.webm` |
-| Set video bitrate | `rust_media transform in.webm out.webm -v vp8 --video-bitrate 2000` | `ffmpeg -i in.webm -c:v libvpx -b:v 2000k out.webm` |
-| Extract audio | `rust_media transform in.webm out.wav -a pcm --no-video` | `ffmpeg -i in.webm -vn -c:a pcm_s16le out.wav` |
-| Video only | `rust_media transform in.webm out.webm -v copy --no-audio` | `ffmpeg -i in.webm -an -c:v copy out.webm` |
+| Copy streams | `rust_media transform -i in.webm out.webm -v copy -a copy` | `ffmpeg -i in.webm -c copy out.webm` |
+| Transcode video | `rust_media transform -i in.webm out.webm -v vp8` | `ffmpeg -i in.webm -c:v libvpx out.webm` |
+| Set video bitrate | `rust_media transform -i in.webm out.webm -v vp8 --video-bitrate 2000` | `ffmpeg -i in.webm -c:v libvpx -b:v 2000k out.webm` |
+| Extract audio | `rust_media transform -i in.webm out.wav -a pcm --no-video` | `ffmpeg -i in.webm -vn -c:a pcm_s16le out.wav` |
+| Video only | `rust_media transform -i in.webm out.webm -v copy --no-audio` | `ffmpeg -i in.webm -an -c:v copy out.webm` |
+| SSIM comparison | `rust_media transform -i ref.mp4 -i dist.mp4 out.mp4 --vf ssim` | `ffmpeg -i dist.mp4 -i ref.mp4 -lavfi ssim -f null -` |
 
 ## Supported Formats
 

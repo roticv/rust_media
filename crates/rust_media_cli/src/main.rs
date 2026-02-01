@@ -54,9 +54,9 @@ enum Commands {
 
     /// Transform (transcode) media files (similar to ffmpeg)
     Transform {
-        /// Input media file
-        #[arg(value_name = "INPUT")]
-        input: PathBuf,
+        /// Input media file(s) - use multiple -i flags for multi-input filters (e.g., ssim)
+        #[arg(short = 'i', long = "input", required = true, num_args = 1)]
+        inputs: Vec<PathBuf>,
 
         /// Output media file
         #[arg(value_name = "OUTPUT")]
@@ -98,15 +98,16 @@ enum Commands {
         #[arg(long)]
         progress: bool,
 
-        /// Video filter graph (e.g., "ssim=reference=ref.mp4")
+        /// Video filter graph (e.g., "ssim")
         ///
         /// Filters are specified as: filter_name=param1=value1:param2=value2
         /// Multiple filters can be chained with commas: filter1,filter2
         ///
         /// Available filters:
-        ///   ssim - Compute SSIM between input and reference video
+        ///   ssim - Compute SSIM between two video inputs
+        ///     Input 0 (-i first) is the reference, Input 1 (-i second) is the distorted
+        ///     Requires two -i inputs
         ///     Parameters:
-        ///       reference=<file>  - Reference video file path (required)
         ///       stats_file=<file> - Output stats to file (optional)
         ///       print_per_frame   - Print per-frame SSIM values (optional)
         #[arg(long = "vf", visible_alias = "video-filter")]
@@ -293,7 +294,7 @@ impl VideoFilter {
             // Handle the case where the first part after filter name might be a positional arg
             let param_parts: Vec<&str> = params_str.split(':').collect();
 
-            for (i, part) in param_parts.iter().enumerate() {
+            for part in param_parts.iter() {
                 let part = part.trim();
                 if part.is_empty() {
                     continue;
@@ -301,9 +302,6 @@ impl VideoFilter {
 
                 if let Some((key, value)) = part.split_once('=') {
                     params.insert(key.trim().to_string(), value.trim().to_string());
-                } else if i == 0 {
-                    // First positional argument - for SSIM this would be reference file
-                    params.insert("reference".to_string(), part.to_string());
                 } else {
                     // Flag-style parameter (e.g., "print_per_frame")
                     params.insert(part.to_string(), "true".to_string());
@@ -356,16 +354,20 @@ struct SsimFrameResult {
 }
 
 /// SSIM filter context - holds state during filtering
+///
+/// Stream 0 (main input) = reference, Stream 1 (second input) = distorted.
+/// The filter internally decodes the distorted input and compares against
+/// reference frames received via `process_frame`.
 struct SsimFilterContext {
-    reference_path: PathBuf,
+    distorted_path: PathBuf,
     stats_file: Option<PathBuf>,
     print_per_frame: bool,
-    // Runtime state
-    ref_demuxer: Option<Box<dyn Demuxer>>,
-    ref_decoder: Option<Box<dyn DecoderWrapper>>,
-    ref_stream_idx: usize,
-    ref_frames: std::collections::VecDeque<Frame>,
-    ref_eof: bool,
+    // Runtime state - decodes the distorted (stream 1) input
+    dist_demuxer: Option<Box<dyn Demuxer>>,
+    dist_decoder: Option<Box<dyn DecoderWrapper>>,
+    dist_stream_idx: usize,
+    dist_frames: std::collections::VecDeque<Frame>,
+    dist_eof: bool,
     // Results
     frame_results: Vec<SsimFrameResult>,
     total_ssim_y: f64,
@@ -378,22 +380,19 @@ struct SsimFilterContext {
 }
 
 impl SsimFilterContext {
-    fn new(filter: &VideoFilter) -> Result<Self, Box<dyn std::error::Error>> {
-        let reference_path = filter.get_param("reference")
-            .ok_or("SSIM filter requires 'reference' parameter")?;
-
+    fn new(distorted_path: &PathBuf, filter: &VideoFilter) -> Result<Self, Box<dyn std::error::Error>> {
         let stats_file = filter.get_param("stats_file").map(PathBuf::from);
         let print_per_frame = filter.has_flag("print_per_frame");
 
         Ok(SsimFilterContext {
-            reference_path: PathBuf::from(reference_path),
+            distorted_path: distorted_path.clone(),
             stats_file,
             print_per_frame,
-            ref_demuxer: None,
-            ref_decoder: None,
-            ref_stream_idx: 0,
-            ref_frames: std::collections::VecDeque::new(),
-            ref_eof: false,
+            dist_demuxer: None,
+            dist_decoder: None,
+            dist_stream_idx: 0,
+            dist_frames: std::collections::VecDeque::new(),
+            dist_eof: false,
             frame_results: Vec::new(),
             total_ssim_y: 0.0,
             total_ssim_u: 0.0,
@@ -406,42 +405,42 @@ impl SsimFilterContext {
     }
 
     fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Open reference demuxer
-        let ref_demuxer = open_demuxer_for_ssim(&self.reference_path)?;
-        let ref_streams = ref_demuxer.streams()?;
+        // Open distorted (stream 1) demuxer
+        let dist_demuxer = open_demuxer_for_ssim(&self.distorted_path)?;
+        let dist_streams = dist_demuxer.streams()?;
 
         // Find video stream
-        let ref_video = find_video_stream(&ref_streams, None)
-            .ok_or("No video stream found in reference file")?;
+        let dist_video = find_video_stream(&dist_streams, None)
+            .ok_or("No video stream found in distorted file")?;
 
-        self.ref_stream_idx = ref_video.index;
+        self.dist_stream_idx = dist_video.index;
 
         // Get dimensions
-        if let StreamParams::Video(params) = &ref_video.params {
+        if let StreamParams::Video(params) = &dist_video.params {
             self.width = params.width;
             self.height = params.height;
         }
 
         // Create decoder
-        let ref_decoder = create_decoder_for_stream(ref_video)?;
+        let dist_decoder = create_decoder_for_stream(dist_video)?;
 
-        self.ref_demuxer = Some(ref_demuxer);
-        self.ref_decoder = Some(ref_decoder);
+        self.dist_demuxer = Some(dist_demuxer);
+        self.dist_decoder = Some(dist_decoder);
 
         Ok(())
     }
 
-    fn process_frame(&mut self, input_frame: &Frame) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_frame(&mut self, reference_frame: &Frame) -> Result<(), Box<dyn std::error::Error>> {
         // Initialize on first frame if needed
-        if self.ref_demuxer.is_none() {
+        if self.dist_demuxer.is_none() {
             self.initialize()?;
         }
 
-        // Get reference frame
-        let ref_frame = self.get_next_reference_frame()?;
+        // Get distorted frame (stream 1)
+        let dist_frame = self.get_next_distorted_frame()?;
 
-        // Calculate SSIM
-        match calculate_frame_ssim(input_frame, &ref_frame) {
+        // Calculate SSIM (reference vs distorted)
+        match calculate_frame_ssim(reference_frame, &dist_frame) {
             Ok((ssim_y, ssim_u, ssim_v, ssim_avg)) => {
                 self.total_ssim_y += ssim_y;
                 self.total_ssim_u += ssim_u;
@@ -450,7 +449,7 @@ impl SsimFilterContext {
 
                 let frame_result = SsimFrameResult {
                     frame_index: self.frame_count,
-                    pts: input_frame.pts(),
+                    pts: reference_frame.pts(),
                     ssim_y,
                     ssim_u,
                     ssim_v,
@@ -475,19 +474,19 @@ impl SsimFilterContext {
         Ok(())
     }
 
-    fn get_next_reference_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error>> {
+    fn get_next_distorted_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error>> {
         // Try to get a buffered frame first
-        if let Some(frame) = self.ref_frames.pop_front() {
+        if let Some(frame) = self.dist_frames.pop_front() {
             return Ok(frame);
         }
 
-        let demuxer = self.ref_demuxer.as_mut().ok_or("Reference demuxer not initialized")?;
-        let decoder = self.ref_decoder.as_mut().ok_or("Reference decoder not initialized")?;
+        let demuxer = self.dist_demuxer.as_mut().ok_or("Distorted demuxer not initialized")?;
+        let decoder = self.dist_decoder.as_mut().ok_or("Distorted decoder not initialized")?;
 
         // Decode frames until we get one
         loop {
-            if self.ref_eof {
-                return Err("Reference video ended before input".into());
+            if self.dist_eof {
+                return Err("Distorted video ended before reference".into());
             }
 
             // Try to receive a frame
@@ -499,19 +498,19 @@ impl SsimFilterContext {
             // Read packets until we get a frame
             match demuxer.read_packet() {
                 Ok(packet) => {
-                    if packet.stream_index() != self.ref_stream_idx {
+                    if packet.stream_index() != self.dist_stream_idx {
                         continue;
                     }
                     let _ = decoder.send_packet(&packet);
                 }
                 Err(_) => {
-                    self.ref_eof = true;
+                    self.dist_eof = true;
                     let _ = decoder.flush();
 
                     // Try one more receive after flush
                     match decoder.receive_frame() {
                         Ok(frame) => return Ok(frame),
-                        Err(_) => return Err("Reference video ended before input".into()),
+                        Err(_) => return Err("Distorted video ended before reference".into()),
                     }
                 }
             }
@@ -525,8 +524,8 @@ impl SsimFilterContext {
         let avg_ssim_avg = if self.frame_count > 0 { self.total_ssim_avg / self.frame_count as f64 } else { 0.0 };
 
         SsimResult {
-            reference: self.reference_path.display().to_string(),
-            distorted: "input".to_string(),
+            reference: "input[0]".to_string(),
+            distorted: self.distorted_path.display().to_string(),
             width: self.width,
             height: self.height,
             frame_count: self.frame_count,
@@ -543,6 +542,7 @@ impl SsimFilterContext {
         eprintln!();
         eprintln!("SSIM Summary:");
         eprintln!("  Reference: {}", result.reference);
+        eprintln!("  Distorted: {}", result.distorted);
         eprintln!("  Frames:    {}", result.frame_count);
         eprintln!("  Y:   {:.6} ({:.2} dB)", result.ssim_y, ssim_to_db(result.ssim_y));
         eprintln!("  U:   {:.6} ({:.2} dB)", result.ssim_u, ssim_to_db(result.ssim_u));
@@ -585,7 +585,7 @@ fn main() {
             }
         }
         Commands::Transform {
-            input,
+            inputs,
             output,
             video_codec,
             audio_codec,
@@ -599,7 +599,7 @@ fn main() {
             video_filter,
         } => {
             if let Err(e) = run_transform(
-                &input,
+                &inputs,
                 &output,
                 &video_codec,
                 &audio_codec,
@@ -625,7 +625,7 @@ fn main() {
 
 #[allow(clippy::too_many_arguments)]
 fn run_transform(
-    input: &PathBuf,
+    inputs: &[PathBuf],
     output: &PathBuf,
     video_codec: &str,
     audio_codec: &str,
@@ -638,6 +638,7 @@ fn run_transform(
     progress: bool,
     video_filter: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let input = inputs.first().ok_or("At least one input file is required")?;
     let input_filename = input.to_string_lossy().to_string();
     let output_filename = output.to_string_lossy().to_string();
 
@@ -760,9 +761,12 @@ fn run_transform(
                     if video_codec == "copy" {
                         return Err("SSIM filter requires video transcoding (cannot use with -v copy)".into());
                     }
-                    println!("Filter: SSIM comparison with reference={}",
-                             filter.get_param("reference").unwrap_or("?"));
-                    ssim_filter = Some(SsimFilterContext::new(filter)?);
+                    if inputs.len() < 2 {
+                        return Err("SSIM filter requires two inputs: -i <reference> -i <distorted>".into());
+                    }
+                    println!("Filter: SSIM comparison (reference={}, distorted={})",
+                             inputs[0].display(), inputs[1].display());
+                    ssim_filter = Some(SsimFilterContext::new(&inputs[1], filter)?);
                 }
                 _ => {
                     return Err(format!("Unknown video filter: {}", filter.name).into());

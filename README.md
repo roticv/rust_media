@@ -115,6 +115,7 @@ This project is in active development. Current status:
   - Audio transcoding (Opus, AAC, PCM)
   - Stream copy (passthrough)
   - Bitrate control
+  - Video filters: SSIM quality comparison (two-input)
   - See [rust_media_cli documentation](crates/rust_media_cli/README.md) for details
 
 ### Other
