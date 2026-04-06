@@ -20,11 +20,13 @@ pub struct WebmDemuxer<R> {
     timecode_scale: u64, // nanoseconds per tick
     cluster_timecode: u64,
     current_position: u64,
+    #[allow(dead_code)]
     segment_start: u64,
     tracks_parsed: bool,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct TrackInfo {
     track_number: u64,
     track_type: u8,
@@ -42,6 +44,7 @@ struct AudioParams {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct VideoParams {
     pixel_width: u64,
     pixel_height: u64,
@@ -590,8 +593,8 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         }
 
         let mut value = (first_byte & (mask - 1)) as u64;
-        for i in 1..length {
-            value = (value << 8) | (data[i] as u64);
+        for &byte in &data[1..length] {
+            value = (value << 8) | (byte as u64);
         }
 
         Ok((value, length))

@@ -222,7 +222,9 @@ impl H264Decoder {
     }
 }
 
-/// Parses AVCDecoderConfigurationRecord from extra_data
+type AvccConfig = (usize, Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// Parses AVCDecoderConfigurationRecord from extra_data.
 ///
 /// Format:
 /// - configurationVersion (1 byte) = 1
@@ -234,7 +236,7 @@ impl H264Decoder {
 /// - For each SPS: length (2 bytes) + SPS data
 /// - numOfPictureParameterSets (1 byte)
 /// - For each PPS: length (2 bytes) + PPS data
-fn parse_avcc_config(data: &[u8]) -> Result<(usize, Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+fn parse_avcc_config(data: &[u8]) -> Result<AvccConfig> {
     if data.len() < 7 {
         return Err(Error::InvalidData(
             "AVCDecoderConfigurationRecord too short".to_string(),

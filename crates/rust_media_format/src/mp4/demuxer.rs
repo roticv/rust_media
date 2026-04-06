@@ -41,6 +41,7 @@ use std::io::{Read, Seek, SeekFrom};
 #[derive(Debug, Clone)]
 struct TrackInfo {
     /// Track ID
+    #[allow(dead_code)]
     track_id: u32,
     /// Stream index (0-based)
     stream_index: usize,
@@ -72,6 +73,7 @@ struct SampleInfo {
     /// Stream index
     stream_index: usize,
     /// Sample index within the track (0-based)
+    #[allow(dead_code)]
     sample_index: u32,
     /// File offset
     offset: u64,

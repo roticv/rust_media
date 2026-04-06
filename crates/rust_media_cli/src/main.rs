@@ -380,12 +380,12 @@ struct SsimFilterContext {
 }
 
 impl SsimFilterContext {
-    fn new(distorted_path: &PathBuf, filter: &VideoFilter) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(distorted_path: &std::path::Path, filter: &VideoFilter) -> Result<Self, Box<dyn std::error::Error>> {
         let stats_file = filter.get_param("stats_file").map(PathBuf::from);
         let print_per_frame = filter.has_flag("print_per_frame");
 
         Ok(SsimFilterContext {
-            distorted_path: distorted_path.clone(),
+            distorted_path: distorted_path.to_path_buf(),
             stats_file,
             print_per_frame,
             dist_demuxer: None,
@@ -490,9 +490,8 @@ impl SsimFilterContext {
             }
 
             // Try to receive a frame
-            match decoder.receive_frame() {
-                Ok(frame) => return Ok(frame),
-                Err(_) => {}
+            if let Ok(frame) = decoder.receive_frame() {
+                return Ok(frame);
             }
 
             // Read packets until we get a frame
@@ -626,7 +625,7 @@ fn main() {
 #[allow(clippy::too_many_arguments)]
 fn run_transform(
     inputs: &[PathBuf],
-    output: &PathBuf,
+    output: &std::path::Path,
     video_codec: &str,
     audio_codec: &str,
     video_bitrate: u64,
@@ -1349,7 +1348,6 @@ fn run_transcode_pipeline<M: Muxer>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn process_packets<D: Demuxer, M: Muxer>(
     demuxer: &mut D,
     muxer: &mut M,
@@ -1417,7 +1415,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
                                     }
                                 }
 
-                                if progress && *frame_count % 100 == 0 {
+                                if progress && (*frame_count).is_multiple_of(100) {
                                     print_progress(frame.pts(), duration, start_time);
                                 }
 
@@ -1714,7 +1712,7 @@ fn create_audio_encoder(
 // ============================================================================
 
 fn run_info(
-    input: &PathBuf,
+    input: &std::path::Path,
     show_packets: bool,
     show_frames: bool,
     count: usize,
@@ -1753,7 +1751,7 @@ fn run_info(
             filename: filename.clone(),
             format_name,
             duration_us: container_duration,
-            duration: container_duration.map(|d| format_duration(d)),
+            duration: container_duration.map(format_duration),
             bitrate: container_bitrate,
             nb_streams: streams.len(),
         },
@@ -1776,6 +1774,12 @@ fn run_info(
 }
 
 // ============================================================================
+/// Return type for format-specific analyzers.
+type AnalyzeResult = Result<
+    (String, Vec<StreamInfoJson>, Option<i64>, Option<u64>, Vec<PacketInfo>, Vec<FrameInfo>),
+    Box<dyn std::error::Error>,
+>;
+
 // Format-specific analyzers
 // ============================================================================
 
@@ -1785,17 +1789,7 @@ fn analyze_mp4(
     show_frames: bool,
     count: usize,
     stream_filter: Option<usize>,
-) -> Result<
-    (
-        String,
-        Vec<StreamInfoJson>,
-        Option<i64>,
-        Option<u64>,
-        Vec<PacketInfo>,
-        Vec<FrameInfo>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> AnalyzeResult {
     let file = File::open(filename)?;
     let reader = BufReader::new(file);
     let mut demuxer = Mp4Demuxer::new(reader)?;
@@ -1803,7 +1797,7 @@ fn analyze_mp4(
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
 
-    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(|s| stream_to_json(s)).collect();
+    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
 
     let mut packets = Vec::new();
     let mut frames = Vec::new();
@@ -1839,17 +1833,7 @@ fn analyze_webm(
     show_frames: bool,
     count: usize,
     stream_filter: Option<usize>,
-) -> Result<
-    (
-        String,
-        Vec<StreamInfoJson>,
-        Option<i64>,
-        Option<u64>,
-        Vec<PacketInfo>,
-        Vec<FrameInfo>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> AnalyzeResult {
     let file = File::open(filename)?;
     let reader = BufReader::new(file);
     let mut demuxer = WebmDemuxer::open(reader)?;
@@ -1857,7 +1841,7 @@ fn analyze_webm(
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
 
-    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(|s| stream_to_json(s)).collect();
+    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
 
     let mut packets = Vec::new();
     let mut frames = Vec::new();
@@ -1893,17 +1877,7 @@ fn analyze_wav(
     show_frames: bool,
     count: usize,
     stream_filter: Option<usize>,
-) -> Result<
-    (
-        String,
-        Vec<StreamInfoJson>,
-        Option<i64>,
-        Option<u64>,
-        Vec<PacketInfo>,
-        Vec<FrameInfo>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> AnalyzeResult {
     let file = File::open(filename)?;
     let reader = BufReader::new(file);
     let mut demuxer = WavDemuxer::open(reader)?;
@@ -1911,7 +1885,7 @@ fn analyze_wav(
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
 
-    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(|s| stream_to_json(s)).collect();
+    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
 
     let mut packets = Vec::new();
     let mut frames = Vec::new();

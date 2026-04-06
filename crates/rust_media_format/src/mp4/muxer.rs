@@ -174,17 +174,14 @@ fn build_avcc(sps_list: &[Vec<u8>], pps_list: &[Vec<u8>]) -> Result<Vec<u8>> {
         return Err(Error::InvalidData("SPS too short".to_string()));
     }
 
-    let mut avcc = Vec::new();
-
-    // AVCDecoderConfigurationRecord
-    avcc.push(1); // configurationVersion
-    avcc.push(sps[1]); // AVCProfileIndication
-    avcc.push(sps[2]); // profile_compatibility
-    avcc.push(sps[3]); // AVCLevelIndication
-    avcc.push(0xFF); // lengthSizeMinusOne = 3 (4-byte NAL lengths) | reserved 6 bits
-
-    // SPS array
-    avcc.push(0xE0 | (sps_list.len() as u8)); // numOfSequenceParameterSets | reserved 3 bits
+    let mut avcc = vec![
+        1,        // configurationVersion
+        sps[1],   // AVCProfileIndication
+        sps[2],   // profile_compatibility
+        sps[3],   // AVCLevelIndication
+        0xFF,     // lengthSizeMinusOne = 3 (4-byte NAL lengths) | reserved 6 bits
+        0xE0 | (sps_list.len() as u8), // numOfSequenceParameterSets | reserved 3 bits
+    ];
     for sps in sps_list {
         let len = sps.len() as u16;
         avcc.extend_from_slice(&len.to_be_bytes());

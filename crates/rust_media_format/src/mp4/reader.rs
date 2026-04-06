@@ -6,7 +6,7 @@ use byteorder::{BigEndian, ReadBytesExt};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::mp4::boxes::*;
-use rust_media_core::error::{Error, Result};
+use rust_media_core::error::Result;
 
 /// Information about a box header
 #[derive(Debug, Clone)]
