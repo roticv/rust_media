@@ -95,11 +95,12 @@ impl Decoder {
             let u_ptr = img.planes[1];
             let v_ptr = img.planes[2];
 
-            let chroma_h = (h + 1) / 2;
+            let chroma_h = h.div_ceil(2);
+            let chroma_w = w.div_ceil(2);
 
             let y = copy_plane(y_ptr, y_stride, w, h);
-            let u = copy_plane(u_ptr, u_stride, (w + 1) / 2, chroma_h);
-            let v = copy_plane(v_ptr, v_stride, (w + 1) / 2, chroma_h);
+            let u = copy_plane(u_ptr, u_stride, chroma_w, chroma_h);
+            let v = copy_plane(v_ptr, v_stride, chroma_w, chroma_h);
 
             frames.push(DecodedFrame {
                 width: w,

@@ -4,20 +4,15 @@ use std::mem::MaybeUninit;
 use std::ptr;
 
 /// Encoding deadline / quality tradeoff.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum Deadline {
     /// Best possible quality (slowest).
     BestQuality,
     /// Good quality (balanced, default).
+    #[default]
     GoodQuality,
     /// Realtime (fastest).
     Realtime,
-}
-
-impl Default for Deadline {
-    fn default() -> Self {
-        Deadline::GoodQuality
-    }
 }
 
 impl Deadline {

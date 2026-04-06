@@ -43,9 +43,8 @@ fn main() {
     generate_bindings(&include);
 }
 
-fn generate_bindings(include_path: &PathBuf) {
-    let wrapper = format!(
-        r#"
+fn generate_bindings(include_path: &std::path::Path) {
+    let wrapper = "\
 #include <vpx/vpx_codec.h>
 #include <vpx/vpx_decoder.h>
 #include <vpx/vpx_encoder.h>
@@ -53,8 +52,7 @@ fn generate_bindings(include_path: &PathBuf) {
 #include <vpx/vp8.h>
 #include <vpx/vp8cx.h>
 #include <vpx/vp8dx.h>
-"#
-    );
+";
 
     // Write wrapper to a temp file
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

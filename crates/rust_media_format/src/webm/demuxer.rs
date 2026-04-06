@@ -448,20 +448,16 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         let start_pos = self.reader.stream_position()?;
         let end_pos = start_pos + parent.size.unwrap_or(0);
 
-        // Look for timecode element
-        while self.reader.stream_position()? < end_pos {
+        // Look for timecode element (first element in cluster)
+        if self.reader.stream_position()? < end_pos {
             let elem = Element::read(&mut self.reader)?;
 
             if elem.id == element_id::TIMECODE {
                 self.cluster_timecode = elem.read_uint(&mut self.reader)?;
-                // Seek back to start of cluster data
-                self.reader.seek(SeekFrom::Start(start_pos))?;
-                return Ok(());
-            } else {
-                // Not timecode, seek back and exit
-                self.reader.seek(SeekFrom::Start(start_pos))?;
-                return Ok(());
             }
+            // Seek back to start of cluster data regardless
+            self.reader.seek(SeekFrom::Start(start_pos))?;
+            return Ok(());
         }
 
         self.reader.seek(SeekFrom::Start(start_pos))?;
