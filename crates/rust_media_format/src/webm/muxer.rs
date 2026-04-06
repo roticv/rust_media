@@ -329,6 +329,18 @@ impl<W: Write + Seek> WebmMuxer<W> {
         Ok(())
     }
 
+    /// Convert a PTS value in the stream's timebase to milliseconds.
+    fn pts_to_ms(&self, stream_index: usize, pts: i64) -> i64 {
+        if let Some(stream) = self.streams.get(stream_index) {
+            let (num, den) = stream.time_base;
+            if den > 0 && num > 0 {
+                return pts * num as i64 * 1000 / den as i64;
+            }
+        }
+        // Fallback: assume microseconds (legacy behavior)
+        pts / 1000
+    }
+
     /// Starts a new cluster
     fn start_cluster(&mut self, timecode: i64) -> Result<()> {
         // Finalize previous cluster if needed
@@ -391,7 +403,7 @@ impl<W: Write + Seek> WebmMuxer<W> {
         }
 
         // Calculate relative timecode (within cluster)
-        let packet_pts_ms = packet.pts().unwrap_or(0) / 1000; // Convert µs to ms
+        let packet_pts_ms = self.pts_to_ms(packet.stream_index(), packet.pts().unwrap_or(0));
         let relative_timecode = (packet_pts_ms - self.cluster_timecode) as i16;
 
         // SimpleBlock structure:
@@ -517,8 +529,8 @@ impl<W: Write + Seek> Muxer for WebmMuxer<W> {
             )));
         }
 
-        // Get packet timestamp in milliseconds
-        let packet_pts_ms = packet.pts().unwrap_or(0) / 1000;
+        // Get packet timestamp in milliseconds using the stream's timebase
+        let packet_pts_ms = self.pts_to_ms(packet.stream_index(), packet.pts().unwrap_or(0));
 
         // Start a new cluster if:
         // 1. No cluster started yet, or

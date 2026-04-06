@@ -1386,6 +1386,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
         Ok(())
     }
 
+
     loop {
         match demuxer.read_packet() {
             Ok(packet) => {
@@ -1647,7 +1648,7 @@ fn create_video_encoder(
     let mut stream_info = StreamInfo::new(0, MediaType::Video, codec.to_string())
         .with_params(StreamParams::Video(video_params))
         .with_bitrate(bitrate)
-        .with_time_base(1, 1000000);
+        .with_time_base(input_stream.time_base.0, input_stream.time_base.1);
 
     // Copy extra data if same codec
     if input_stream.codec == codec {
