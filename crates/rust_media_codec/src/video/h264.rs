@@ -1,38 +1,23 @@
-//! H.264/AVC video decoder implementation using OpenH264
+//! H.264/AVC video decoder implementation using rust_h264
 //!
-//! Provides H.264 decoding via the OpenH264 library (Cisco's open source implementation).
+//! Provides H.264 decoding via the rust_h264 crate (pure Rust implementation).
 //!
 //! # Licensing
 //!
-//! OpenH264 is licensed under BSD-2-Clause, making it compatible with the project's
+//! rust_h264 is licensed under MIT/Apache-2.0, making it compatible with the project's
 //! MIT/Apache-2.0 default license. No special feature flags are required.
 //!
-//! # Profile Support Limitation
+//! # Profile Support
 //!
-//! **Important**: OpenH264 only supports **Constrained Baseline Profile** up to Level 5.2.
-//! It does NOT support Main Profile or High Profile.
-//!
-//! Most H.264 videos use High Profile for better compression. Videos encoded with
-//! Main or High profile will fail to decode with this decoder.
-//!
-//! | Profile | Supported |
-//! |---------|-----------|
-//! | Constrained Baseline | ✅ |
-//! | Baseline | ❌ |
-//! | Main | ❌ |
-//! | High | ❌ |
-//!
-//! For High Profile support, consider using FFmpeg's libavcodec or hardware decoders.
+//! This decoder supports Baseline, Main, and High profiles.
 //!
 //! # Current Implementation Status
 //!
 //! ## Decoder
-//! - ✅ Constrained Baseline Profile decoding with YUV420P (I420) output
-//! - ✅ Supports both AVCC format (MP4) and Annex B format (raw H.264)
-//! - ✅ Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
-//! - ✅ Proper flush handling for B-frames and buffered data
-//! - ❌ Main Profile not supported
-//! - ❌ High Profile not supported
+//! - Supports Baseline, Main, and High Profile decoding with YUV420P (I420) output
+//! - Supports both AVCC format (MP4) and Annex B format (raw H.264)
+//! - Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
+//! - Proper flush handling for B-frames and buffered data
 //!
 //! # Example
 //!
@@ -49,8 +34,8 @@
 //! // ... decode packets using send_packet() and receive_frame()
 //! ```
 
-use openh264::decoder::{Decoder as OpenH264DecoderInternal, DecodedYUV};
-use openh264::formats::YUVSource;
+use rust_h264::decoder::Decoder as RustH264Decoder;
+use rust_h264::nal::parse_annex_b;
 use rust_media_core::{
     Decoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
 };
@@ -58,15 +43,9 @@ use rust_media_core::{
 /// Annex B start code (4-byte version)
 const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 
-/// H.264/AVC video decoder using OpenH264
+/// H.264/AVC video decoder using rust_h264
 ///
 /// Decodes H.264-compressed video packets into raw YUV frames.
-///
-/// # Profile Limitation
-///
-/// **Warning**: This decoder only supports **Constrained Baseline Profile**.
-/// Videos encoded with Main Profile or High Profile will fail to decode.
-/// Most commercial H.264 content uses High Profile.
 ///
 /// # MP4 Support
 ///
@@ -80,10 +59,9 @@ const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 /// - Input packets can be in AVCC format (MP4) or Annex B format (raw H.264)
 /// - Output is always YUV420P (I420) format
 /// - The decoder handles B-frames internally; use `flush()` to retrieve buffered frames
-/// - Only Constrained Baseline Profile is supported (OpenH264 limitation)
 pub struct H264Decoder {
     stream_info: StreamInfo,
-    decoder: OpenH264DecoderInternal,
+    decoder: RustH264Decoder,
     buffered_frames: Vec<Frame>,
     flushed: bool,
     /// NAL unit length size in bytes (1, 2, or 4) from AVCDecoderConfigurationRecord
@@ -115,9 +93,7 @@ impl H264Decoder {
             )));
         }
 
-        // Create decoder
-        let decoder = OpenH264DecoderInternal::new()
-            .map_err(|e| Error::Decode(format!("Failed to create H.264 decoder: {:?}", e)))?;
+        let decoder = RustH264Decoder::new();
 
         // Parse AVCDecoderConfigurationRecord if present in extra_data
         let (nal_length_size, sps_list, pps_list) = if !stream_info.extra_data.is_empty() {
@@ -202,12 +178,47 @@ impl H264Decoder {
         }
 
         if !config_data.is_empty() {
-            // Send SPS/PPS to decoder - OpenH264 needs this before decoding frames
-            let _ = self.decoder.decode(&config_data);
+            // Parse the config data into NAL units and feed to decoder
+            let nals = parse_annex_b(&config_data);
+            for nal in &nals {
+                let _ = self.decoder.decode_nal(nal);
+            }
         }
 
         self.sent_sps_pps = true;
         Ok(())
+    }
+
+    /// Convert a rust_h264 Frame to a rust_media_core Frame
+    fn convert_frame(
+        h264_frame: &rust_h264::decoder::Frame,
+        pts: Option<i64>,
+    ) -> Result<Frame> {
+        let width = h264_frame.width as usize;
+        let height = h264_frame.height as usize;
+
+        let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
+        frame.set_pts(pts);
+
+        // Copy Y plane
+        let y_plane = frame
+            .plane_mut(0)
+            .ok_or_else(|| Error::InvalidData("Failed to get Y plane".to_string()))?;
+        y_plane.copy_from_slice(&h264_frame.y);
+
+        // Copy U plane
+        let u_plane = frame
+            .plane_mut(1)
+            .ok_or_else(|| Error::InvalidData("Failed to get U plane".to_string()))?;
+        u_plane.copy_from_slice(&h264_frame.u);
+
+        // Copy V plane
+        let v_plane = frame
+            .plane_mut(2)
+            .ok_or_else(|| Error::InvalidData("Failed to get V plane".to_string()))?;
+        v_plane.copy_from_slice(&h264_frame.v);
+
+        Ok(frame)
     }
 }
 
@@ -290,63 +301,6 @@ fn parse_avcc_config(data: &[u8]) -> Result<(usize, Vec<Vec<u8>>, Vec<Vec<u8>>)>
     Ok((nal_length_size, sps_list, pps_list))
 }
 
-/// Converts a DecodedYUV to a Frame (standalone function to avoid borrow issues)
-fn decoded_yuv_to_frame(yuv: &DecodedYUV, pts: Option<i64>) -> Result<Frame> {
-    let (width, height) = yuv.dimensions();
-
-    let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
-    frame.set_pts(pts);
-
-    // Get strides for each plane
-    let (y_stride, u_stride, v_stride) = yuv.strides();
-
-    // Get Y, U, V data via YUVSource trait
-    let y_data = yuv.y();
-    let u_data = yuv.u();
-    let v_data = yuv.v();
-
-    // Copy Y plane (full resolution)
-    let y_frame_plane = frame
-        .plane_mut(0)
-        .ok_or_else(|| Error::InvalidData("Failed to get Y plane".to_string()))?;
-    for row in 0..height {
-        let src_start = row * y_stride;
-        let src_end = src_start + width;
-        let dst_start = row * width;
-        let dst_end = dst_start + width;
-        y_frame_plane[dst_start..dst_end].copy_from_slice(&y_data[src_start..src_end]);
-    }
-
-    // Copy U plane (half resolution)
-    let uv_height = height / 2;
-    let uv_width = width / 2;
-
-    let u_frame_plane = frame
-        .plane_mut(1)
-        .ok_or_else(|| Error::InvalidData("Failed to get U plane".to_string()))?;
-    for row in 0..uv_height {
-        let src_start = row * u_stride;
-        let src_end = src_start + uv_width;
-        let dst_start = row * uv_width;
-        let dst_end = dst_start + uv_width;
-        u_frame_plane[dst_start..dst_end].copy_from_slice(&u_data[src_start..src_end]);
-    }
-
-    // Copy V plane (half resolution)
-    let v_frame_plane = frame
-        .plane_mut(2)
-        .ok_or_else(|| Error::InvalidData("Failed to get V plane".to_string()))?;
-    for row in 0..uv_height {
-        let src_start = row * v_stride;
-        let src_end = src_start + uv_width;
-        let dst_start = row * uv_width;
-        let dst_end = dst_start + uv_width;
-        v_frame_plane[dst_start..dst_end].copy_from_slice(&v_data[src_start..src_end]);
-    }
-
-    Ok(frame)
-}
-
 impl Decoder for H264Decoder {
     fn codec(&self) -> &str {
         "h264"
@@ -377,20 +331,20 @@ impl Decoder for H264Decoder {
             data.to_vec()
         };
 
-        // Decode the packet
-        let decode_result = self.decoder.decode(&annex_b_data);
-        match decode_result {
-            Ok(Some(yuv)) => {
-                let frame = decoded_yuv_to_frame(&yuv, pts)?;
-                self.buffered_frames.push(frame);
-            }
-            Ok(None) => {
-                // No frame available yet (need more data or buffered for reordering)
-            }
-            Err(e) => {
-                // OpenH264 can sometimes fail on corrupted data but recover
-                // Log the error but don't fail entirely unless we want strict mode
-                return Err(Error::Decode(format!("H.264 decode error: {:?}", e)));
+        // Parse NAL units and feed to decoder
+        let nals = parse_annex_b(&annex_b_data);
+        for nal in &nals {
+            match self.decoder.decode_nal(nal) {
+                Ok(Some(h264_frame)) => {
+                    let frame = Self::convert_frame(&h264_frame, pts)?;
+                    self.buffered_frames.push(frame);
+                }
+                Ok(None) => {
+                    // No frame available yet (need more data or buffered for reordering)
+                }
+                Err(e) => {
+                    return Err(Error::Decode(format!("H.264 decode error: {}", e)));
+                }
             }
         }
 
@@ -409,18 +363,9 @@ impl Decoder for H264Decoder {
 
     fn flush(&mut self) -> Result<()> {
         // Flush remaining frames from the decoder
-        let flush_result = self.decoder.flush_remaining();
-        match flush_result {
-            Ok(remaining_frames) => {
-                for yuv in remaining_frames {
-                    if let Ok(frame) = decoded_yuv_to_frame(&yuv, None) {
-                        self.buffered_frames.push(frame);
-                    }
-                }
-            }
-            Err(e) => {
-                // Log error but don't fail - some frames may still be recoverable
-                eprintln!("Warning: H.264 flush error: {:?}", e);
+        if let Some(h264_frame) = self.decoder.flush() {
+            if let Ok(frame) = Self::convert_frame(&h264_frame, None) {
+                self.buffered_frames.push(frame);
             }
         }
 
@@ -429,9 +374,7 @@ impl Decoder for H264Decoder {
     }
 
     fn reset(&mut self) -> Result<()> {
-        // Create a new decoder instance for reset
-        self.decoder = OpenH264DecoderInternal::new()
-            .map_err(|e| Error::Decode(format!("Failed to reset H.264 decoder: {:?}", e)))?;
+        self.decoder = RustH264Decoder::new();
         self.buffered_frames.clear();
         self.flushed = false;
         self.sent_sps_pps = false;

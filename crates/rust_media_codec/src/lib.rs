@@ -5,7 +5,7 @@
 //! # Video Codecs
 //! - **VP8** - ✅ Implemented (via libvpx)
 //! - **VP9** - ✅ Implemented (via libvpx)
-//! - **H.264/AVC** - ✅ Decoder implemented (via OpenH264, BSD-2-Clause) - Constrained Baseline only
+//! - **H.264/AVC** - ✅ Decoder implemented (via rust_h264, pure Rust, MIT/Apache-2.0)
 //! - **H.264/AVC** - ✅ Decoder implemented (via VideoToolbox, macOS only) - All profiles
 //! - **H.264/AVC** - ✅ Encoder implemented (via x264, requires `gpl-x264` feature)
 //! - AV1 (planned)
@@ -37,7 +37,7 @@ pub mod video;
 // Re-export commonly used codecs
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
-pub use video::openh264::H264Decoder;
+pub use video::h264::H264Decoder;
 pub use video::vp8::{Vp8Decoder, Vp8Encoder};
 pub use video::vp9::{Vp9Decoder, Vp9Encoder};
 

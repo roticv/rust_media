@@ -20,8 +20,8 @@ videotoolbox = []
 rust_media_core = { workspace = true }
 audiopus = "0.3.0-rc.0"
 vpx-rs = "0.2.1"
-# OpenH264 - BSD-2-Clause licensed (default, MIT-compatible)
-openh264 = { version = "0.6", features = ["source"] }
+# rust_h264 - Pure Rust H.264 decoder (MIT/Apache-2.0)
+rust_h264 = "0.2.0"
 # GPL v2+ licensed - only included when gpl-x264 feature is enabled
 x264 = { version = "0.5", optional = true }
 # FDK-AAC - Fraunhofer FDK AAC Codec License

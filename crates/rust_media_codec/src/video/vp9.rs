@@ -548,4 +548,5 @@ mod tests {
         let encoder = Vp9Encoder::with_bitrate(stream_info, 2_000_000);
         assert!(encoder.is_ok());
     }
+
 }
