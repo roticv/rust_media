@@ -467,6 +467,7 @@ mod transform {
         // Copy VP9 video to new WebM
         let result = run_cli_text(&[
             "transform",
+            "-i",
             &input,
             output_str,
             "-v",
@@ -500,6 +501,7 @@ mod transform {
         // Transcode VP9 to VP8
         let result = run_cli_text(&[
             "transform",
+            "-i",
             &input,
             output_str,
             "-v",
@@ -535,6 +537,7 @@ mod transform {
         // Transcode VP8 to VP9
         let result = run_cli_text(&[
             "transform",
+            "-i",
             &input,
             output_str,
             "-v",
@@ -564,6 +567,7 @@ mod transform {
         // Copy Opus audio to new WebM
         let result = run_cli_text(&[
             "transform",
+            "-i",
             &input,
             output_str,
             "-a",
@@ -596,6 +600,7 @@ mod transform {
         // Extract Opus audio to WAV
         let result = run_cli_text(&[
             "transform",
+            "-i",
             &input,
             output_str,
             "-a",
@@ -628,6 +633,7 @@ mod transform {
         // Copy video (should preserve frame count)
         run_cli_text(&[
             "transform",
+            "-i",
             &input,
             output_str,
             "-v",
