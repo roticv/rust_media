@@ -174,21 +174,34 @@ impl Encoder {
         self.collect_packets()
     }
 
-    /// Signal end of stream and flush remaining packets.
+    /// Signal end of stream and flush all remaining packets.
+    ///
+    /// Repeatedly calls `vpx_codec_encode(NULL)` until libvpx has no more
+    /// buffered data, collecting all output packets.
     pub fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        let status = unsafe {
-            vpx_sys::vpx_codec_encode(
-                &mut self.ctx,
-                ptr::null(),
-                0,
-                0,
-                0,
-                Deadline::default().as_raw(),
-            )
-        };
-        error::check(status, Some(&self.ctx))?;
+        let mut all_packets = Vec::new();
 
-        self.collect_packets()
+        loop {
+            let status = unsafe {
+                vpx_sys::vpx_codec_encode(
+                    &mut self.ctx,
+                    ptr::null(),
+                    0,
+                    0,
+                    0,
+                    Deadline::default().as_raw(),
+                )
+            };
+            error::check(status, Some(&self.ctx))?;
+
+            let packets = self.collect_packets()?;
+            if packets.is_empty() {
+                break;
+            }
+            all_packets.extend(packets);
+        }
+
+        Ok(all_packets)
     }
 
     /// Collect all pending compressed packets from the codec.

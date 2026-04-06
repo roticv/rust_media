@@ -214,6 +214,18 @@ impl Encoder for Vp9Encoder {
     }
 
     fn flush(&mut self) -> Result<()> {
+        let packets = self.encoder.flush()
+            .map_err(|e| Error::Encode(format!("VP9 flush failed: {}", e)))?;
+
+        for ep in packets {
+            let mut pkt = Packet::new(ep.data, 0, MediaType::Video);
+            pkt.set_pts(Some(ep.pts));
+            if ep.is_keyframe {
+                pkt.set_keyframe(true);
+            }
+            self.buffered_packets.push(pkt);
+        }
+
         self.flushed = true;
         Ok(())
     }
