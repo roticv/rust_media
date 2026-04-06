@@ -1,0 +1,11 @@
+[package]
+name = "vpx-sys"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Raw FFI bindings to libvpx, generated at build time via bindgen"
+links = "vpx"
+
+[build-dependencies]
+bindgen = "0.71"
+pkg-config = "0.3"

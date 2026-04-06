@@ -1,0 +1,9 @@
+[package]
+name = "vpx"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Safe Rust wrapper around libvpx for VP8/VP9 encoding and decoding"
+
+[dependencies]
+vpx-sys = { path = "../vpx_sys" }

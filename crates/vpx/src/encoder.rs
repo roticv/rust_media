@@ -1,0 +1,236 @@
+use crate::error::{self, Result};
+use crate::image::Codec;
+use std::mem::MaybeUninit;
+use std::ptr;
+
+/// Encoding deadline / quality tradeoff.
+#[derive(Debug, Clone, Copy)]
+pub enum Deadline {
+    /// Best possible quality (slowest).
+    BestQuality,
+    /// Good quality (balanced, default).
+    GoodQuality,
+    /// Realtime (fastest).
+    Realtime,
+}
+
+impl Default for Deadline {
+    fn default() -> Self {
+        Deadline::GoodQuality
+    }
+}
+
+impl Deadline {
+    fn as_raw(self) -> std::os::raw::c_ulong {
+        match self {
+            Deadline::BestQuality => vpx_sys::VPX_DL_BEST_QUALITY as _,
+            Deadline::GoodQuality => vpx_sys::VPX_DL_GOOD_QUALITY as _,
+            Deadline::Realtime => vpx_sys::VPX_DL_REALTIME as _,
+        }
+    }
+}
+
+/// Per-frame encoder flags.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameFlags {
+    /// Force this frame to be a keyframe.
+    pub force_keyframe: bool,
+}
+
+impl FrameFlags {
+    fn as_raw(self) -> std::os::raw::c_long {
+        let mut flags = 0;
+        if self.force_keyframe {
+            flags |= vpx_sys::VPX_EFLAG_FORCE_KF as std::os::raw::c_long;
+        }
+        flags
+    }
+}
+
+/// Rate control mode.
+#[derive(Debug, Clone, Copy)]
+pub enum RateControl {
+    /// Variable bitrate (kbps).
+    VBR(u32),
+    /// Constant bitrate (kbps).
+    CBR(u32),
+}
+
+/// Encoder configuration.
+pub struct EncoderConfig {
+    pub codec: Codec,
+    pub width: u32,
+    pub height: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub rate_control: RateControl,
+}
+
+/// A compressed output packet from the encoder.
+pub struct EncodedPacket {
+    pub data: Vec<u8>,
+    pub pts: i64,
+    pub is_keyframe: bool,
+}
+
+/// VP8/VP9 encoder.
+pub struct Encoder {
+    ctx: vpx_sys::vpx_codec_ctx_t,
+    width: u32,
+    height: u32,
+}
+
+impl Encoder {
+    /// Create a new encoder.
+    pub fn new(config: &EncoderConfig) -> Result<Self> {
+        let iface = config.codec.encoder_iface();
+
+        let mut cfg =
+            unsafe { MaybeUninit::<vpx_sys::vpx_codec_enc_cfg_t>::zeroed().assume_init() };
+        let status =
+            unsafe { vpx_sys::vpx_codec_enc_config_default(iface as *mut _, &mut cfg, 0) };
+        error::check(status, None)?;
+
+        cfg.g_w = config.width;
+        cfg.g_h = config.height;
+        cfg.g_timebase.num = config.timebase_num as i32;
+        cfg.g_timebase.den = config.timebase_den as i32;
+
+        match config.rate_control {
+            RateControl::VBR(kbps) => {
+                cfg.rc_end_usage = vpx_sys::vpx_rc_mode_VPX_VBR;
+                cfg.rc_target_bitrate = kbps;
+            }
+            RateControl::CBR(kbps) => {
+                cfg.rc_end_usage = vpx_sys::vpx_rc_mode_VPX_CBR;
+                cfg.rc_target_bitrate = kbps;
+            }
+        }
+
+        let mut ctx =
+            unsafe { MaybeUninit::<vpx_sys::vpx_codec_ctx_t>::zeroed().assume_init() };
+        let status = unsafe {
+            vpx_sys::vpx_codec_enc_init_ver(
+                &mut ctx,
+                iface as *mut _,
+                &cfg,
+                0,
+                vpx_sys::VPX_ENCODER_ABI_VERSION as i32,
+            )
+        };
+        error::check(status, Some(&ctx))?;
+
+        Ok(Self {
+            ctx,
+            width: config.width,
+            height: config.height,
+        })
+    }
+
+    /// Encode a single I420 frame.
+    ///
+    /// `yuv_data` must be packed I420: Y plane (w*h), then U (w/2*h/2), then V (w/2*h/2).
+    pub fn encode(
+        &mut self,
+        pts: i64,
+        duration: u64,
+        yuv_data: &[u8],
+        deadline: Deadline,
+        flags: FrameFlags,
+    ) -> Result<Vec<EncodedPacket>> {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let expected = w * h + 2 * (w / 2) * (h / 2);
+        if yuv_data.len() != expected {
+            return Err(crate::Error::BadImageData {
+                expected,
+                got: yuv_data.len(),
+            });
+        }
+
+        let mut img =
+            unsafe { MaybeUninit::<vpx_sys::vpx_image_t>::zeroed().assume_init() };
+        let result = unsafe {
+            vpx_sys::vpx_img_wrap(
+                &mut img,
+                vpx_sys::vpx_img_fmt_VPX_IMG_FMT_I420,
+                self.width,
+                self.height,
+                1,
+                yuv_data.as_ptr() as *mut u8,
+            )
+        };
+        if result.is_null() {
+            return Err(crate::Error::InvalidParam("vpx_img_wrap failed".into()));
+        }
+
+        let status = unsafe {
+            vpx_sys::vpx_codec_encode(
+                &mut self.ctx,
+                &img,
+                pts,
+                duration as std::os::raw::c_ulong,
+                flags.as_raw(),
+                deadline.as_raw(),
+            )
+        };
+        error::check(status, Some(&self.ctx))?;
+
+        self.collect_packets()
+    }
+
+    /// Signal end of stream and flush remaining packets.
+    pub fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+        let status = unsafe {
+            vpx_sys::vpx_codec_encode(
+                &mut self.ctx,
+                ptr::null(),
+                0,
+                0,
+                0,
+                Deadline::default().as_raw(),
+            )
+        };
+        error::check(status, Some(&self.ctx))?;
+
+        self.collect_packets()
+    }
+
+    /// Collect all pending compressed packets from the codec.
+    fn collect_packets(&mut self) -> Result<Vec<EncodedPacket>> {
+        let mut packets = Vec::new();
+        let mut iter = ptr::null();
+
+        loop {
+            let pkt = unsafe { vpx_sys::vpx_codec_get_cx_data(&mut self.ctx, &mut iter) };
+            if pkt.is_null() {
+                break;
+            }
+            let pkt = unsafe { &*pkt };
+
+            if pkt.kind == vpx_sys::vpx_codec_cx_pkt_kind_VPX_CODEC_CX_FRAME_PKT {
+                let frame = unsafe { &pkt.data.frame };
+                let data = unsafe {
+                    std::slice::from_raw_parts(frame.buf as *const u8, frame.sz)
+                };
+                let is_keyframe = (frame.flags & vpx_sys::VPX_FRAME_IS_KEY) != 0;
+
+                packets.push(EncodedPacket {
+                    data: data.to_vec(),
+                    pts: frame.pts,
+                    is_keyframe,
+                });
+            }
+        }
+
+        Ok(packets)
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        unsafe {
+            vpx_sys::vpx_codec_destroy(&mut self.ctx);
+        }
+    }
+}

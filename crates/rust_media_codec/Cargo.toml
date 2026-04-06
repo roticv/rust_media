@@ -19,7 +19,7 @@ videotoolbox = []
 [dependencies]
 rust_media_core = { workspace = true }
 audiopus = "0.3.0-rc.0"
-vpx-rs = "0.2.1"
+vpx = { path = "../vpx" }
 # rust_h264 - Pure Rust H.264 decoder (MIT/Apache-2.0)
 rust_h264 = "0.2.0"
 # GPL v2+ licensed - only included when gpl-x264 feature is enabled

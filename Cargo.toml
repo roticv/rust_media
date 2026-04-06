@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/vpx_sys",
+    "crates/vpx",
     "crates/rust_media_core",
     "crates/rust_media_format",
     "crates/rust_media_codec",
