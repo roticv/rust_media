@@ -4,8 +4,8 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use rust_media::{
-    AudioStreamParams, Decoder, Demuxer, Encoder, Frame, MediaType, Muxer, Packet, PixelFormat,
-    SampleFormat, StreamInfo, StreamParams, VideoStreamParams,
+    AudioStreamParams, Decoder, Demuxer, Encoder, Frame, FrameReorderBuffer, MediaType, Muxer,
+    Packet, PixelFormat, SampleFormat, StreamInfo, StreamParams, VideoStreamParams,
 };
 use rust_media_format::mp4::{Mp4Demuxer, Mp4Muxer};
 use rust_media_format::wav::{WavDemuxer, WavMuxer};
@@ -1370,6 +1370,24 @@ fn process_packets<D: Demuxer, M: Muxer>(
     start_time: std::time::Instant,
     ssim_filter: &mut Option<SsimFilterContext>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Reorder buffer for video frames (B-frame decode order → PTS order)
+    let mut reorder_buf = FrameReorderBuffer::new();
+
+    /// Helper: encode a frame and write resulting packets to the muxer.
+    fn encode_and_mux<M: Muxer>(
+        encoder: &mut Box<dyn EncoderWrapper>,
+        muxer: &mut M,
+        frame: &Frame,
+        out_idx: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        encoder.send_frame(frame)?;
+        while let Ok(mut enc_packet) = encoder.receive_packet() {
+            enc_packet.set_stream_index(out_idx);
+            muxer.write_packet(&enc_packet)?;
+        }
+        Ok(())
+    }
+
     loop {
         match demuxer.read_packet() {
             Ok(packet) => {
@@ -1387,7 +1405,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
                         } else if let (Some(decoder), Some(encoder)) =
                             (video_decoder.as_mut(), video_encoder.as_mut())
                         {
-                            // Transcode
+                            // Transcode: decode → reorder → encode
                             decoder.send_packet(&packet)?;
                             while let Ok(frame) = decoder.receive_frame() {
                                 *frame_count += 1;
@@ -1399,14 +1417,14 @@ fn process_packets<D: Demuxer, M: Muxer>(
                                     }
                                 }
 
-                                encoder.send_frame(&frame)?;
-                                while let Ok(mut enc_packet) = encoder.receive_packet() {
-                                    enc_packet.set_stream_index(out_idx);
-                                    muxer.write_packet(&enc_packet)?;
-                                }
-
                                 if progress && *frame_count % 100 == 0 {
                                     print_progress(frame.pts(), duration, start_time);
+                                }
+
+                                // Push into reorder buffer; encode frames that are ready
+                                reorder_buf.push(frame);
+                                while let Some(ordered_frame) = reorder_buf.pop_ready() {
+                                    encode_and_mux(encoder, muxer, &ordered_frame, out_idx)?;
                                 }
                             }
                         }
@@ -1443,7 +1461,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
         }
     }
 
-    // Flush video encoder
+    // Flush video decoder → reorder buffer → encoder
     if let (Some(decoder), Some(encoder)) = (video_decoder.as_mut(), video_encoder.as_mut()) {
         decoder.flush()?;
         while let Ok(frame) = decoder.receive_frame() {
@@ -1454,15 +1472,22 @@ fn process_packets<D: Demuxer, M: Muxer>(
                 }
             }
 
-            encoder.send_frame(&frame)?;
-            while let Ok(mut enc_packet) = encoder.receive_packet() {
+            reorder_buf.push(frame);
+            while let Some(ordered_frame) = reorder_buf.pop_ready() {
                 if let Some(out_idx) = video_out_idx {
-                    enc_packet.set_stream_index(out_idx);
-                    muxer.write_packet(&enc_packet)?;
+                    encode_and_mux(encoder, muxer, &ordered_frame, out_idx)?;
                 }
             }
         }
 
+        // Drain all remaining frames from reorder buffer
+        while let Some(ordered_frame) = reorder_buf.flush_next() {
+            if let Some(out_idx) = video_out_idx {
+                encode_and_mux(encoder, muxer, &ordered_frame, out_idx)?;
+            }
+        }
+
+        // Flush the encoder itself
         encoder.flush()?;
         while let Ok(mut enc_packet) = encoder.receive_packet() {
             if let Some(out_idx) = video_out_idx {

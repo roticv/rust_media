@@ -24,6 +24,7 @@ pub mod demuxer;
 pub mod decoder;
 pub mod encoder;
 pub mod muxer;
+pub mod reorder;
 
 // Re-export commonly used types
 pub use packet::Packet;
@@ -35,3 +36,4 @@ pub use demuxer::{Demuxer, DemuxerBuilder, DemuxerOptions, FormatDetection};
 pub use decoder::{Decoder, DecoderConfig, DecoderOptions, DecoderCapabilities, CodecId};
 pub use encoder::{Encoder, EncoderConfig, EncoderOptions, EncoderCapabilities};
 pub use muxer::{Muxer, MuxerBuilder, MuxerOptions};
+pub use reorder::FrameReorderBuffer;
