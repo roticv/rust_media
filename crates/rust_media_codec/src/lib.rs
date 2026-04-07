@@ -15,7 +15,7 @@
 //! - **PCM** (raw audio) - ✅ Implemented
 //! - **Opus** - ✅ Implemented (via libopus)
 //! - **AAC** - ✅ Encoder and decoder implemented (via libfdk-aac, requires `fdk-aac` feature)
-//! - MP3 (future)
+//! - **MP3** - ✅ Decoder implemented (via minimp3)
 //! - Vorbis (future)
 //! - FLAC (future)
 //!
@@ -35,6 +35,7 @@ pub mod audio;
 pub mod video;
 
 // Re-export commonly used codecs
+pub use audio::mp3::Mp3Decoder;
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
 pub use video::h264::H264Decoder;

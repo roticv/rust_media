@@ -1598,6 +1598,9 @@ fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
         "opus" => rust_media_codec::OpusDecoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "mp3" => rust_media_codec::Mp3Decoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
         "vp8" => rust_media_codec::Vp8Decoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
