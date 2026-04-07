@@ -3,7 +3,7 @@
 //! A Rust-based media conversion and processing tool (FFmpeg equivalent)
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rust_media_filter::audio::AudioResampler;
+use rust_media_filter::audio::{AudioResampler, VolumeFilter};
 use rust_media_filter::video::ssim::{calculate_frame_ssim, ssim_to_db};
 use rust_media_filter::{Filter, FilterGraph};
 use rust_media::{
@@ -682,6 +682,7 @@ fn run_transform(
 
     // Parse audio filter graph
     let mut audio_resampler: Option<AudioResampler> = None;
+    let mut volume_filter: Option<VolumeFilter> = None;
 
     if let Some(filter_str) = audio_filter {
         let filter_graph = FilterGraph::parse(filter_str)
@@ -689,6 +690,32 @@ fn run_transform(
 
         for filter in &filter_graph.filters {
             match filter.name.as_str() {
+                "volume" => {
+                    // volume=2.0 or volume=0.5 or volume=6dB
+                    let val_str = filter
+                        .get_param("volume")
+                        .or_else(|| {
+                            filter.params.keys()
+                                .find(|k| k.as_str() != "true" && k.as_str() != "1")
+                                .map(|k| k.as_str())
+                        })
+                        .ok_or("volume filter requires a value (e.g., volume=0.5 or volume=6dB)")?;
+
+                    let vf = if let Some(db_str) = val_str.strip_suffix("dB") {
+                        let db: f64 = db_str
+                            .parse()
+                            .map_err(|_| format!("Invalid dB value: {}", val_str))?;
+                        println!("Filter: volume ({:.1} dB, {:.3}x)", db, 10.0f64.powf(db / 20.0));
+                        VolumeFilter::from_db(db)
+                    } else {
+                        let gain: f64 = val_str
+                            .parse()
+                            .map_err(|_| format!("Invalid volume value: {}", val_str))?;
+                        println!("Filter: volume ({:.3}x, {:.1} dB)", gain, 20.0 * gain.max(f64::EPSILON).log10());
+                        VolumeFilter::new(gain)
+                    };
+                    volume_filter = Some(vf);
+                }
                 "aresample" => {
                     // aresample=48000 or aresample=sample_rate=48000
                     let rate_str = filter
@@ -757,6 +784,7 @@ fn run_transform(
                 progress,
                 &mut ssim_filter,
                 &mut audio_resampler,
+                &volume_filter,
             )?;
         }
         "webm" => {
@@ -773,6 +801,7 @@ fn run_transform(
                 progress,
                 &mut ssim_filter,
                 &mut audio_resampler,
+                &volume_filter,
             )?;
         }
         "wav" => {
@@ -818,6 +847,7 @@ fn transcode_to_mp4(
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
     audio_resampler: &mut Option<AudioResampler>,
+    volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let mut writer = BufWriter::new(output_file);
@@ -893,6 +923,7 @@ fn transcode_to_mp4(
         progress,
         ssim_filter,
         audio_resampler,
+        volume_filter,
     )?;
 
     muxer.write_trailer()?;
@@ -919,6 +950,7 @@ fn transcode_to_webm(
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
     audio_resampler: &mut Option<AudioResampler>,
+    volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let writer = BufWriter::new(output_file);
@@ -1005,6 +1037,7 @@ fn transcode_to_webm(
         progress,
         ssim_filter,
         audio_resampler,
+        volume_filter,
     )?;
 
     muxer.write_trailer()?;
@@ -1163,6 +1196,7 @@ fn run_transcode_pipeline<M: Muxer>(
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
     audio_resampler: &mut Option<AudioResampler>,
+    volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create decoders and encoders
     let mut video_decoder: Option<Box<dyn DecoderWrapper>> = None;
@@ -1241,6 +1275,7 @@ fn run_transcode_pipeline<M: Muxer>(
         &stream_time_bases,
         ssim_filter,
         audio_resampler,
+        volume_filter,
     )?;
 
     if let Some(ps) = &mut progress_state {
@@ -1279,6 +1314,7 @@ fn process_packets<M: Muxer>(
     stream_time_bases: &[(u32, u32)],
     ssim_filter: &mut Option<SsimFilterContext>,
     audio_resampler: &mut Option<AudioResampler>,
+    volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reorder buffer for video frames (B-frame decode order → PTS order)
     let mut reorder_buf = FrameReorderBuffer::new();
@@ -1375,6 +1411,11 @@ fn process_packets<M: Muxer>(
                                 } else {
                                     frame
                                 };
+                                let frame = if let Some(vf) = volume_filter {
+                                    vf.process(&frame)?
+                                } else {
+                                    frame
+                                };
                                 encoder.send_frame(&frame)?;
                                 while let Ok(mut enc_packet) = encoder.receive_packet() {
                                     output_bytes += enc_packet.size() as u64;
@@ -1433,6 +1474,11 @@ fn process_packets<M: Muxer>(
         while let Ok(frame) = decoder.receive_frame() {
             let frame = if let Some(resampler) = audio_resampler {
                 resampler.resample(&frame)?
+            } else {
+                frame
+            };
+            let frame = if let Some(vf) = volume_filter {
+                vf.process(&frame)?
             } else {
                 frame
             };
