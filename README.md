@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MP4 ✅ demuxer + muxer, MKV planned)
-- **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, AAC ✅; AV1 planned)
+- **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AAC ✅; AV1 planned)
 - **Filter** support (audio resampling ✅, volume ✅, SSIM quality metric ✅)
 - **Format detection** from magic bytes with file extension fallback
 - **Modular architecture** with separate crates for different components
@@ -92,7 +92,7 @@ This project is in active development. Current status:
 ### Container Formats
 - ✅ **WAV** demuxer + muxer (PCM audio)
 - ✅ **WebM** demuxer + muxer (VP8/VP9 video, Opus audio)
-- ✅ **MP4** demuxer + muxer (H.264, VP9 video; AAC, Opus audio)
+- ✅ **MP4** demuxer + muxer (H.264, H.265/HEVC, VP9 video; AAC, MP3, Opus audio)
 - 📋 MKV demuxer/muxer - Planned
 
 ### Codecs
@@ -104,6 +104,7 @@ This project is in active development. Current status:
 - ✅ **H.264** decoder (via rust_h264, pure Rust, MIT/Apache-2.0) - *Baseline, Main, High profiles*
 - ✅ **H.264** decoder (via VideoToolbox, requires `videotoolbox` feature) - *All profiles, macOS only*
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
+- ✅ **H.265/HEVC** decoder (via VideoToolbox, requires `videotoolbox` feature) - *macOS only, hardware accelerated*
 - ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
 - 📋 AV1 codec - Planned
 
@@ -138,13 +139,13 @@ Some codecs require external libraries with specific licensing and are available
 |---------|-------|---------|---------|----------|
 | `gpl-x264` | H.264 encoder | x264 | GPL v2+ | All |
 | `fdk-aac` | AAC encoder + decoder | libfdk-aac | Fraunhofer FDK AAC License | All |
-| `videotoolbox` | H.264 decoder (all profiles) | VideoToolbox | Apple | macOS only |
+| `videotoolbox` | H.264 + H.265/HEVC decoder (all profiles) | VideoToolbox | Apple | macOS only |
 
 **Warning**: Enabling `gpl-x264` changes the license of compiled binaries to GPL.
 
 **Note**: The `fdk-aac` feature uses the Fraunhofer FDK AAC License, which is more permissive than GPL but has some restrictions on use.
 
-**Note**: The `videotoolbox` feature enables hardware-accelerated H.264 decoding on macOS with support for all H.264 profiles (Baseline, Main, High). This is recommended over OpenH264 for commercial content.
+**Note**: The `videotoolbox` feature enables hardware-accelerated H.264 and H.265/HEVC decoding on macOS with support for all profiles (including Main 10 for HDR content).
 
 ```bash
 # Build with H.264 encoder support (GPL)
@@ -153,7 +154,7 @@ cargo build --features gpl-x264
 # Build with AAC encoder support
 cargo build --features fdk-aac
 
-# Build with VideoToolbox H.264 decoder (macOS, all profiles)
+# Build with VideoToolbox H.264/H.265 decoder (macOS, all profiles)
 cargo build --features videotoolbox
 
 # Build with both video and audio encoding

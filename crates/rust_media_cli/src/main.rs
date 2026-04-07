@@ -1706,6 +1706,15 @@ fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
                 .ok()
                 .map(|d| Box::new(d) as Box<dyn DecoderWrapper>)
         }
+        "hevc" | "h265" | "hvc1" | "hev1" => {
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            {
+                if let Ok(decoder) = rust_media_codec::VideoToolboxHevcDecoder::new(stream.clone()) {
+                    return Some(Box::new(decoder) as Box<dyn DecoderWrapper>);
+                }
+            }
+            None // No software HEVC decoder available
+        }
         #[cfg(feature = "fdk-aac")]
         "aac" => rust_media_codec::FdkAacDecoder::new(stream.clone())
             .ok()

@@ -52,6 +52,8 @@ pub use audio::fdk_aac::{FdkAacDecoder, FdkAacEncoder};
 // VideoToolbox hardware acceleration (macOS only)
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use video::videotoolbox::VideoToolboxH264Decoder;
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use video::videotoolbox::VideoToolboxHevcDecoder;
 
 #[cfg(test)]
 mod tests {

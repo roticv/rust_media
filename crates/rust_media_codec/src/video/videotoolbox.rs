@@ -766,6 +766,343 @@ impl Decoder for VideoToolboxH264Decoder {
     }
 }
 
+// ============================================================================
+// HEVC/H.265 VideoToolbox Decoder
+// ============================================================================
+
+/// H.265/HEVC video decoder using Apple VideoToolbox (hardware accelerated)
+///
+/// Decodes HEVC-compressed video packets into raw YUV frames using macOS hardware acceleration.
+///
+/// # Profile Support
+///
+/// VideoToolbox supports all HEVC profiles including:
+/// - Main Profile (8-bit)
+/// - Main 10 Profile (10-bit, HDR)
+/// - Main Still Picture
+///
+/// # Notes
+///
+/// - macOS only (requires `videotoolbox` feature)
+/// - Input packets should be in hvcC format (from MP4)
+/// - Output is YUV420P (NV12 internally, converted to I420)
+pub struct VideoToolboxHevcDecoder {
+    stream_info: StreamInfo,
+    format_description: Option<Retained<CMVideoFormatDescription>>,
+    session: Option<Retained<VTDecompressionSession>>,
+    buffered_frames: Arc<Mutex<VecDeque<Frame>>>,
+    flushed: bool,
+    #[allow(dead_code)]
+    nal_length_size: usize,
+    width: usize,
+    height: usize,
+    #[allow(dead_code)]
+    callback_context: Option<Box<DecompressionContext>>,
+}
+
+impl VideoToolboxHevcDecoder {
+    /// Creates a new VideoToolbox HEVC decoder from stream information
+    ///
+    /// `extra_data` should contain HEVCDecoderConfigurationRecord (hvcC)
+    pub fn new(stream_info: StreamInfo) -> Result<Self> {
+        if stream_info.codec != "hevc" && stream_info.codec != "h265" && stream_info.codec != "hvc1" && stream_info.codec != "hev1" {
+            return Err(Error::Unsupported(format!(
+                "Expected hevc/h265 codec, got {}",
+                stream_info.codec
+            )));
+        }
+
+        let (width, height) = match &stream_info.params {
+            rust_media_core::StreamParams::Video(params) => (params.width, params.height),
+            _ => {
+                return Err(Error::InvalidData(
+                    "Expected video stream params".to_string(),
+                ))
+            }
+        };
+
+        let nal_length_size = if stream_info.extra_data.len() >= 23 {
+            // HEVCDecoderConfigurationRecord: lengthSizeMinusOne is bottom 2 bits of byte 21
+            ((stream_info.extra_data[21] & 0x03) + 1) as usize
+        } else {
+            4
+        };
+
+        let mut decoder = Self {
+            stream_info,
+            format_description: None,
+            session: None,
+            buffered_frames: Arc::new(Mutex::new(VecDeque::new())),
+            flushed: false,
+            nal_length_size,
+            width,
+            height,
+            callback_context: None,
+        };
+
+        if !decoder.stream_info.extra_data.is_empty() {
+            decoder.initialize_session()?;
+        }
+
+        Ok(decoder)
+    }
+
+    fn initialize_session(&mut self) -> Result<()> {
+        let format_desc = create_hevc_format_description(&self.stream_info.extra_data)?;
+        self.format_description = Some(format_desc.clone());
+
+        let (session, ctx) = create_decompression_session(
+            &format_desc,
+            self.buffered_frames.clone(),
+            self.width,
+            self.height,
+        )?;
+        self.session = Some(session);
+        self.callback_context = Some(ctx);
+
+        Ok(())
+    }
+
+    fn create_sample_buffer(
+        &self,
+        data: &[u8],
+        pts: Option<i64>,
+    ) -> Result<Retained<CMSampleBuffer>> {
+        let format_desc = self
+            .format_description
+            .as_ref()
+            .ok_or_else(|| Error::InvalidData("Format description not initialized".to_string()))?;
+
+        let block_buffer = create_block_buffer(data)?;
+
+        let timing = CMSampleTimingInfo {
+            duration: CMTime {
+                value: 1,
+                timescale: 30,
+                flags: CMTimeFlags(1),
+                epoch: 0,
+            },
+            presentationTimeStamp: CMTime {
+                value: pts.unwrap_or(0),
+                timescale: self.stream_info.time_base.1 as i32,
+                flags: CMTimeFlags(1),
+                epoch: 0,
+            },
+            decodeTimeStamp: CMTime {
+                value: 0,
+                timescale: 0,
+                flags: CMTimeFlags(0),
+                epoch: 0,
+            },
+        };
+
+        create_sample_buffer_from_block_buffer(&block_buffer, format_desc, &timing, data.len())
+    }
+}
+
+/// Create a CMVideoFormatDescription from HEVCDecoderConfigurationRecord
+fn create_hevc_format_description(hvcc_data: &[u8]) -> Result<Retained<CMVideoFormatDescription>> {
+    unsafe {
+        let param_sets = parse_hvcc_parameter_sets(hvcc_data)?;
+
+        if param_sets.is_empty() {
+            return Err(Error::InvalidData("No parameter sets found in hvcC".to_string()));
+        }
+
+        let mut param_set_pointers: Vec<*const u8> = Vec::new();
+        let mut param_set_sizes: Vec<usize> = Vec::new();
+
+        for ps in &param_sets {
+            param_set_pointers.push(ps.as_ptr());
+            param_set_sizes.push(ps.len());
+        }
+
+        let nal_unit_header_length = ((hvcc_data[21] & 0x03) + 1) as i32;
+
+        let mut format_desc: *mut CMFormatDescription = ptr::null_mut();
+
+        let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+            ptr::null(),
+            param_set_pointers.len(),
+            param_set_pointers.as_ptr(),
+            param_set_sizes.as_ptr(),
+            nal_unit_header_length,
+            ptr::null(), // extensions
+            &mut format_desc,
+        );
+
+        if status != 0 {
+            return Err(Error::Decode(format!(
+                "Failed to create HEVC format description: {}",
+                status
+            )));
+        }
+
+        if format_desc.is_null() {
+            return Err(Error::Decode(
+                "HEVC format description is null".to_string(),
+            ));
+        }
+
+        Ok(Retained::from_raw(format_desc as *mut CMVideoFormatDescription).unwrap())
+    }
+}
+
+/// Parse VPS, SPS, and PPS from HEVCDecoderConfigurationRecord
+///
+/// hvcC structure (ISO 14496-15 section 8.3.3.1.2):
+/// - bytes 0-21: configuration fields
+/// - byte 22: numOfArrays
+/// - For each array:
+///   - byte 0: array_completeness (1 bit) + reserved (1 bit) + NAL_unit_type (6 bits)
+///   - bytes 1-2: numNalus (u16)
+///   - For each NAL:
+///     - bytes 0-1: nalUnitLength (u16)
+///     - nalUnitLength bytes: NAL unit data
+fn parse_hvcc_parameter_sets(data: &[u8]) -> Result<Vec<Vec<u8>>> {
+    if data.len() < 23 {
+        return Err(Error::InvalidData(
+            "HEVCDecoderConfigurationRecord too short".to_string(),
+        ));
+    }
+
+    let num_arrays = data[22] as usize;
+    let mut pos = 23;
+    let mut param_sets = Vec::new();
+
+    for _ in 0..num_arrays {
+        if pos + 3 > data.len() {
+            break;
+        }
+
+        // Skip NAL type byte
+        pos += 1;
+
+        let num_nalus = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        for _ in 0..num_nalus {
+            if pos + 2 > data.len() {
+                break;
+            }
+            let nal_length = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+
+            if pos + nal_length > data.len() {
+                break;
+            }
+            param_sets.push(data[pos..pos + nal_length].to_vec());
+            pos += nal_length;
+        }
+    }
+
+    Ok(param_sets)
+}
+
+impl Decoder for VideoToolboxHevcDecoder {
+    fn codec(&self) -> &str {
+        "hevc"
+    }
+
+    fn stream_info(&self) -> &StreamInfo {
+        &self.stream_info
+    }
+
+    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
+        if packet.media_type() != MediaType::Video {
+            return Err(Error::InvalidData(format!(
+                "Expected video packet, got {:?}",
+                packet.media_type()
+            )));
+        }
+
+        if self.session.is_none() {
+            if self.stream_info.extra_data.is_empty() {
+                return Err(Error::InvalidData(
+                    "No HEVCDecoderConfigurationRecord available".to_string(),
+                ));
+            }
+            self.initialize_session()?;
+        }
+
+        let session = self.session.as_ref().unwrap();
+        let pts = packet.pts();
+        let data = packet.data();
+
+        let sample_buffer = self.create_sample_buffer(data, pts)?;
+
+        unsafe {
+            let mut info_flags: u32 = 0;
+            let session_ptr: *mut VTDecompressionSession = &**session as *const _ as *mut _;
+
+            let status = VTDecompressionSessionDecodeFrame(
+                session_ptr,
+                &*sample_buffer as *const _ as *mut CMSampleBuffer,
+                0,
+                ptr::null_mut(),
+                &mut info_flags,
+            );
+
+            if status != 0 && status != -12909 {
+                return Err(Error::Decode(format!(
+                    "VTDecompressionSessionDecodeFrame failed: {}",
+                    status
+                )));
+            }
+
+            let _ = VTDecompressionSessionWaitForAsynchronousFrames(session_ptr);
+        }
+
+        Ok(())
+    }
+
+    fn receive_frame(&mut self) -> Result<Frame> {
+        let mut frames = self.buffered_frames.lock().unwrap();
+        if let Some(frame) = frames.pop_front() {
+            Ok(frame)
+        } else if self.flushed {
+            Err(Error::EndOfStream)
+        } else {
+            Err(Error::NeedMoreData)
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if let Some(session) = &self.session {
+            unsafe {
+                let session_ptr: *mut VTDecompressionSession = &**session as *const _ as *mut _;
+                let _ = VTDecompressionSessionFinishDelayedFrames(session_ptr);
+                let _ = VTDecompressionSessionWaitForAsynchronousFrames(session_ptr);
+            }
+        }
+        self.flushed = true;
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        if let Some(session) = self.session.take() {
+            unsafe {
+                let session_ptr: *const VTDecompressionSession = &*session;
+                VTDecompressionSessionInvalidate(session_ptr as *mut _);
+            }
+        }
+        self.callback_context = None;
+        self.format_description = None;
+        self.buffered_frames.lock().unwrap().clear();
+        self.flushed = false;
+
+        if !self.stream_info.extra_data.is_empty() {
+            self.initialize_session()?;
+        }
+
+        Ok(())
+    }
+
+    fn is_flushed(&self) -> bool {
+        self.flushed
+    }
+}
+
 // External C functions from VideoToolbox and CoreMedia
 #[link(name = "VideoToolbox", kind = "framework")]
 #[link(name = "CoreMedia", kind = "framework")]
@@ -777,6 +1114,16 @@ extern "C" {
         parameterSetPointers: *const *const u8,
         parameterSetSizes: *const usize,
         nalUnitHeaderLength: i32,
+        formatDescriptionOut: *mut *mut CMFormatDescription,
+    ) -> i32;
+
+    fn CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        allocator: *const std::ffi::c_void,
+        parameterSetCount: usize,
+        parameterSetPointers: *const *const u8,
+        parameterSetSizes: *const usize,
+        nalUnitHeaderLength: i32,
+        extensions: *const std::ffi::c_void,
         formatDescriptionOut: *mut *mut CMFormatDescription,
     ) -> i32;
 

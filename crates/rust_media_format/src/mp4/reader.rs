@@ -176,6 +176,7 @@ pub fn parse_stsd<R: Read + Seek>(reader: &mut R, size: u64) -> Result<Vec<Sampl
         let entry = match entry_header.box_type {
             MP4A => parse_mp4a_entry(reader, &entry_header)?,
             AVC1 => parse_avc1_entry(reader, &entry_header)?,
+            HVC1 | HEV1 => parse_hevc_entry(reader, &entry_header)?,
             VP09 => parse_vp09_entry(reader, &entry_header)?,
             OPUS => parse_opus_entry(reader, &entry_header)?,
             DOT_MP3 => parse_mp3_entry(reader, &entry_header)?,
@@ -361,6 +362,47 @@ fn parse_avc1_entry<R: Read + Seek>(reader: &mut R, header: &BoxHeader) -> Resul
 
     Ok(SampleEntry::Video(VideoSampleEntry {
         codec: "h264".to_string(),
+        width,
+        height,
+        extra_data,
+    }))
+}
+
+/// Parses hvc1/hev1 (HEVC/H.265) sample entry
+fn parse_hevc_entry<R: Read + Seek>(reader: &mut R, header: &BoxHeader) -> Result<SampleEntry> {
+    let entry_end = header.offset + header.size;
+
+    // Video sample entry fields (same layout as avc1)
+    reader.seek(SeekFrom::Current(8))?; // reserved + data ref index
+    let _version = reader.read_u16::<BigEndian>()?;
+    let _revision = reader.read_u16::<BigEndian>()?;
+    let _vendor = reader.read_u32::<BigEndian>()?;
+    let _temporal_quality = reader.read_u32::<BigEndian>()?;
+    let _spatial_quality = reader.read_u32::<BigEndian>()?;
+    let width = reader.read_u16::<BigEndian>()?;
+    let height = reader.read_u16::<BigEndian>()?;
+    let _h_resolution = reader.read_u32::<BigEndian>()?;
+    let _v_resolution = reader.read_u32::<BigEndian>()?;
+    let _data_size = reader.read_u32::<BigEndian>()?;
+    let _frame_count = reader.read_u16::<BigEndian>()?;
+    reader.seek(SeekFrom::Current(32))?; // compressor name
+    let _depth = reader.read_u16::<BigEndian>()?;
+    let _color_table = reader.read_i16::<BigEndian>()?;
+
+    // Look for hvcC box (HEVCDecoderConfigurationRecord)
+    let mut extra_data = Vec::new();
+
+    while reader.stream_position()? < entry_end {
+        let child = read_box_header(reader)?;
+        if child.box_type == HVCC {
+            extra_data = read_box_content(reader, child.content_size() as usize)?;
+            break;
+        }
+        skip_box(reader, &child)?;
+    }
+
+    Ok(SampleEntry::Video(VideoSampleEntry {
+        codec: "hevc".to_string(),
         width,
         height,
         extra_data,

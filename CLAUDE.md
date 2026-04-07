@@ -13,7 +13,7 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 ### Default (MIT License)
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
-- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (OpenH264/BSD-2-Clause), AV1 (dav1d, rav1e/BSD-MIT)
+- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 (dav1d, rav1e/BSD-MIT)
 - **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), Vorbis (libvorbis/BSD), FLAC (libflac/BSD)
 
 ### Optional GPL Features
@@ -45,7 +45,8 @@ x264 = { version = "...", optional = true }
 | H.264 (decode) | rust_h264 | MIT/Apache-2.0 | *(default)* | ✅ Implemented (Baseline, Main, High) |
 | H.264 (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (all profiles, macOS) |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
-| H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
+| H.265/HEVC (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (macOS, all profiles) |
+| H.265/HEVC (encode) | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
 | MP3 (decode) | minimp3 | MIT | *(default)* | ✅ Implemented |
 | AAC | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
@@ -96,7 +97,7 @@ rust_media/
 │   │   └── MKV demuxer/muxer (planned)
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), AV1 (planned)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode), AV1 (planned)
 │   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations
@@ -215,7 +216,7 @@ Both structures support:
   - Example: WebM container can hold VP8, VP9, or AV1 video streams with Opus or Vorbis audio
 
 - **Codecs** (handled by decoders/encoders):
-  - **Video codecs**: VP8 ✅, VP9 ✅, H.264 ✅ (decoder + encoder), H.265/HEVC, AV1, MPEG-4, MPEG-2
+  - **Video codecs**: VP8 ✅, VP9 ✅, H.264 ✅ (decoder + encoder), H.265/HEVC ✅ (VideoToolbox decode), AV1, MPEG-4, MPEG-2
   - **Audio codecs**: PCM ✅, Opus ✅, AAC ✅ (decoder + encoder), MP3, Vorbis, FLAC
   - **Image codecs**: JPEG, PNG, HEIC, AVIF
   - A decoder takes Packets and produces Frames
@@ -250,7 +251,7 @@ Build comprehensive testing infrastructure including:
   - Efficient: ~50% less overhead than FFmpeg output (363 bytes vs 711 bytes)
   - See `examples/webm_remux.rs` for usage
 - ✅ **MP4** (ISO Base Media File Format): Demuxer + Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
-  - Supports H.264/AVC (avc1), VP9 (vp09), AAC (mp4a), MP3 (.mp3), and Opus audio
+  - Supports H.264/AVC (avc1), H.265/HEVC (hvc1/hev1), VP9 (vp09), AAC (mp4a), MP3 (.mp3), and Opus audio
   - Muxer: Streaming API with incremental packet writing
   - Muxer: File structure: ftyp | mdat | moov (streaming-friendly)
   - Complete sample table support: stts, stsc, stsz, stco/co64, stss, ctts
@@ -290,6 +291,14 @@ Build comprehensive testing infrastructure including:
   - Tile-based encoding for better parallelization
   - BSD-3-Clause licensed - default, MIT-compatible
   - See `crates/rust_media_codec/examples/test_vp9_codec.rs` for decode/encode roundtrip example
+- ✅ **H.265/HEVC** (decoder) **IMPLEMENTED** via VideoToolbox
+  - **Decoder**: VideoToolbox (macOS only) in `rust_media_codec/src/video/videotoolbox.rs`
+    - Requires `videotoolbox` feature flag
+    - Hardware accelerated on Apple Silicon
+    - Supports Main, Main 10 (10-bit/HDR), and Main Still Picture profiles
+    - Parses HEVCDecoderConfigurationRecord (hvcC) from MP4
+    - YUV420P output (NV12 internally, converted to I420)
+    - No software fallback available (macOS only)
 - **AV1** (planned)
   - Uses dav1d (decoder) and rav1e (encoder) - BSD/MIT licensed
   - Modern codec with best compression, royalty-free
@@ -318,7 +327,7 @@ Build comprehensive testing infrastructure including:
 - AVIF
 
 **Possible Future Codec Support** (depending on requirements):
-- **H.265/HEVC**: Modern successor to H.264, better compression but more complex
+- **H.265/HEVC encode**: Via x265 (GPL v2+), requires `gpl-x265` feature
 - **Vorbis**: Open audio codec (used in WebM)
 - **FLAC**: Lossless audio codec
 
