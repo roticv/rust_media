@@ -6,6 +6,7 @@ members = [
     "crates/rust_media_core",
     "crates/rust_media_format",
     "crates/rust_media_codec",
+    "crates/rust_media_filter",
     "crates/rust_media",
     "crates/rust_media_cli",
 ]
@@ -22,6 +23,7 @@ repository = "https://github.com/yourusername/rust_media"
 rust_media_core = { path = "crates/rust_media_core" }
 rust_media_format = { path = "crates/rust_media_format" }
 rust_media_codec = { path = "crates/rust_media_codec" }
+rust_media_filter = { path = "crates/rust_media_filter" }
 
 [profile.release]
 opt-level = 3

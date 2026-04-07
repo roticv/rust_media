@@ -3,6 +3,9 @@
 //! A Rust-based media conversion and processing tool (FFmpeg equivalent)
 
 use clap::{Parser, Subcommand, ValueEnum};
+use rust_media_filter::audio::AudioResampler;
+use rust_media_filter::video::ssim::{calculate_frame_ssim, ssim_to_db};
+use rust_media_filter::{Filter, FilterGraph};
 use rust_media::{
     AudioStreamParams, Decoder, Demuxer, Encoder, Frame, FrameReorderBuffer, MediaType, Muxer,
     Packet, PixelFormat, SampleFormat, StreamInfo, StreamParams, VideoStreamParams,
@@ -246,182 +249,10 @@ enum FrameParamsJson {
     Unknown {},
 }
 
-// ============================================================================
-// Video Filter Graph
-// ============================================================================
-
-/// Parsed video filter with name and parameters
-#[derive(Debug, Clone)]
-struct VideoFilter {
-    name: String,
-    params: std::collections::HashMap<String, String>,
-}
-
-/// Filter graph containing a chain of video filters
-#[derive(Debug, Clone)]
-struct FilterGraph {
-    filters: Vec<VideoFilter>,
-}
-
-impl FilterGraph {
-    /// Parse a filter graph string in FFmpeg-like format
-    /// Format: "filter1=param1=value1:param2=value2,filter2=param=value"
-    fn parse(filter_str: &str) -> Result<Self, String> {
-        let mut filters = Vec::new();
-
-        for filter_spec in filter_str.split(',') {
-            let filter_spec = filter_spec.trim();
-            if filter_spec.is_empty() {
-                continue;
-            }
-
-            let filter = VideoFilter::parse(filter_spec)?;
-            filters.push(filter);
-        }
-
-        if filters.is_empty() {
-            return Err("No filters specified".to_string());
-        }
-
-        Ok(FilterGraph { filters })
-    }
-}
-
-impl VideoFilter {
-    /// Parse a single filter specification
-    /// Format: "filter_name=param1=value1:param2=value2" or "filter_name"
-    fn parse(spec: &str) -> Result<Self, String> {
-        let mut parts = spec.splitn(2, '=');
-        let name = parts.next().unwrap_or("").trim().to_string();
-
-        if name.is_empty() {
-            return Err("Filter name is empty".to_string());
-        }
-
-        let mut params = std::collections::HashMap::new();
-
-        if let Some(params_str) = parts.next() {
-            // Parse key=value pairs separated by colons
-            // Handle the case where the first part after filter name might be a positional arg
-            let param_parts: Vec<&str> = params_str.split(':').collect();
-
-            for part in param_parts.iter() {
-                let part = part.trim();
-                if part.is_empty() {
-                    continue;
-                }
-
-                if let Some((key, value)) = part.split_once('=') {
-                    params.insert(key.trim().to_string(), value.trim().to_string());
-                } else {
-                    // Flag-style parameter (e.g., "print_per_frame")
-                    params.insert(part.to_string(), "true".to_string());
-                }
-            }
-        }
-
-        Ok(VideoFilter { name, params })
-    }
-
-    /// Get a parameter value
-    fn get_param(&self, key: &str) -> Option<&str> {
-        self.params.get(key).map(|s| s.as_str())
-    }
-
-    /// Check if a flag parameter is set
-    fn has_flag(&self, key: &str) -> bool {
-        self.params.get(key).map(|v| v == "true" || v == "1").unwrap_or(false)
-    }
-}
+/// Parsed video filter (alias for filter crate type, used in SSIM context)
 
 // ============================================================================
-// Audio resampler
-// ============================================================================
-
-/// Linear interpolation audio resampler
-struct AudioResampler {
-    target_sample_rate: u32,
-}
-
-impl AudioResampler {
-    fn new(target_sample_rate: u32) -> Self {
-        Self { target_sample_rate }
-    }
-
-    /// Resample an audio frame to the target sample rate.
-    /// Uses linear interpolation on interleaved S16 samples.
-    fn resample(&self, frame: &Frame) -> Result<Frame, Box<dyn std::error::Error>> {
-        let params = frame
-            .audio_params()
-            .ok_or("Not an audio frame")?;
-
-        let src_rate = params.sample_rate;
-        let dst_rate = self.target_sample_rate;
-
-        if src_rate == dst_rate {
-            return Ok(frame.clone());
-        }
-
-        let channels = params.channels;
-        let src_samples = params.num_samples;
-        let dst_samples = ((src_samples as u64 * dst_rate as u64) / src_rate as u64) as usize;
-
-        if dst_samples == 0 {
-            return Ok(frame.clone());
-        }
-
-        // Read source interleaved i16 samples
-        let src_data = frame.plane(0).ok_or("Missing audio data")?;
-        let src_len = src_samples * channels;
-        let mut src_i16 = Vec::with_capacity(src_len);
-        for i in 0..src_len {
-            let lo = src_data[i * 2];
-            let hi = src_data[i * 2 + 1];
-            src_i16.push(i16::from_le_bytes([lo, hi]));
-        }
-
-        // Resample each channel via linear interpolation
-        let mut dst_i16 = vec![0i16; dst_samples * channels];
-        let ratio = src_rate as f64 / dst_rate as f64;
-
-        for dst_idx in 0..dst_samples {
-            let src_pos = dst_idx as f64 * ratio;
-            let src_idx = src_pos as usize;
-            let frac = src_pos - src_idx as f64;
-
-            for ch in 0..channels {
-                let s0 = src_i16[src_idx * channels + ch] as f64;
-                let s1 = if src_idx + 1 < src_samples {
-                    src_i16[(src_idx + 1) * channels + ch] as f64
-                } else {
-                    s0
-                };
-                let interpolated = s0 + frac * (s1 - s0);
-                dst_i16[dst_idx * channels + ch] =
-                    interpolated.round().clamp(-32768.0, 32767.0) as i16;
-            }
-        }
-
-        // Build output frame
-        let mut out = Frame::new_audio(dst_rate, channels, SampleFormat::S16, dst_samples);
-        let out_data = out.plane_mut(0).ok_or("Missing output data")?;
-        for (i, &sample) in dst_i16.iter().enumerate() {
-            let bytes = sample.to_le_bytes();
-            out_data[i * 2] = bytes[0];
-            out_data[i * 2 + 1] = bytes[1];
-        }
-
-        // Preserve PTS
-        out.set_pts(frame.pts());
-        let duration = (dst_samples as u64 * 1_000_000) / dst_rate as u64;
-        out = out.with_duration(duration as i64);
-
-        Ok(out)
-    }
-}
-
-// ============================================================================
-// SSIM data structures
+// SSIM data structures (CLI-specific orchestration, uses rust_media_filter for computation)
 // ============================================================================
 
 #[derive(Serialize)]
@@ -477,7 +308,7 @@ struct SsimFilterContext {
 }
 
 impl SsimFilterContext {
-    fn new(distorted_path: &std::path::Path, filter: &VideoFilter) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(distorted_path: &std::path::Path, filter: &Filter) -> Result<Self, Box<dyn std::error::Error>> {
         let stats_file = filter.get_param("stats_file").map(PathBuf::from);
         let print_per_frame = filter.has_flag("print_per_frame");
 
@@ -2419,106 +2250,8 @@ fn print_text_output(info: &MediaInfo) {
 }
 
 // ============================================================================
-// SSIM (Structural Similarity Index) implementation
+// SSIM helper functions (CLI-specific: demuxer opening, stream finding)
 // ============================================================================
-
-/// Constants for SSIM calculation
-const SSIM_K1: f64 = 0.01;
-const SSIM_K2: f64 = 0.03;
-const SSIM_L: f64 = 255.0; // Dynamic range for 8-bit images
-
-/// Calculate SSIM between two image planes (Y, U, or V)
-///
-/// SSIM formula:
-/// SSIM(x, y) = (2*μx*μy + C1)(2*σxy + C2) / ((μx² + μy² + C1)(σx² + σy² + C2))
-fn calculate_ssim_plane(plane1: &[u8], plane2: &[u8], width: usize, height: usize) -> f64 {
-    if plane1.len() != plane2.len() || plane1.len() != width * height {
-        return 0.0;
-    }
-
-    let n = (width * height) as f64;
-    if n == 0.0 {
-        return 1.0;
-    }
-
-    // Calculate means
-    let sum1: f64 = plane1.iter().map(|&x| x as f64).sum();
-    let sum2: f64 = plane2.iter().map(|&x| x as f64).sum();
-    let mean1 = sum1 / n;
-    let mean2 = sum2 / n;
-
-    // Calculate variances and covariance
-    let mut var1 = 0.0;
-    let mut var2 = 0.0;
-    let mut covar = 0.0;
-
-    for i in 0..plane1.len() {
-        let diff1 = plane1[i] as f64 - mean1;
-        let diff2 = plane2[i] as f64 - mean2;
-        var1 += diff1 * diff1;
-        var2 += diff2 * diff2;
-        covar += diff1 * diff2;
-    }
-
-    var1 /= n;
-    var2 /= n;
-    covar /= n;
-
-    // SSIM constants
-    let c1 = (SSIM_K1 * SSIM_L).powi(2);
-    let c2 = (SSIM_K2 * SSIM_L).powi(2);
-
-    // SSIM formula
-    let numerator = (2.0 * mean1 * mean2 + c1) * (2.0 * covar + c2);
-    let denominator = (mean1.powi(2) + mean2.powi(2) + c1) * (var1 + var2 + c2);
-
-    if denominator == 0.0 {
-        return 1.0; // Identical images
-    }
-
-    numerator / denominator
-}
-
-/// Calculate SSIM for a YUV420P frame
-/// Returns (ssim_y, ssim_u, ssim_v, ssim_avg)
-fn calculate_frame_ssim(frame1: &Frame, frame2: &Frame) -> Result<(f64, f64, f64, f64), String> {
-    // Get dimensions from video parameters
-    let params1 = frame1.video_params().ok_or("Frame 1 is not a video frame")?;
-    let params2 = frame2.video_params().ok_or("Frame 2 is not a video frame")?;
-    let (width1, height1) = (params1.width, params1.height);
-    let (width2, height2) = (params2.width, params2.height);
-
-    if width1 != width2 || height1 != height2 {
-        return Err(format!(
-            "Frame dimensions mismatch: {}x{} vs {}x{}",
-            width1, height1, width2, height2
-        ));
-    }
-
-    // Get Y plane
-    let y1 = frame1.plane(0).ok_or("Frame 1 missing Y plane")?;
-    let y2 = frame2.plane(0).ok_or("Frame 2 missing Y plane")?;
-
-    // Get U and V planes (for YUV420P, these are quarter resolution)
-    let u1 = frame1.plane(1).ok_or("Frame 1 missing U plane")?;
-    let u2 = frame2.plane(1).ok_or("Frame 2 missing U plane")?;
-    let v1 = frame1.plane(2).ok_or("Frame 1 missing V plane")?;
-    let v2 = frame2.plane(2).ok_or("Frame 2 missing V plane")?;
-
-    let uv_width = width1 / 2;
-    let uv_height = height1 / 2;
-
-    // Calculate SSIM for each plane
-    let ssim_y = calculate_ssim_plane(y1, y2, width1, height1);
-    let ssim_u = calculate_ssim_plane(u1, u2, uv_width, uv_height);
-    let ssim_v = calculate_ssim_plane(v1, v2, uv_width, uv_height);
-
-    // Weighted average (Y is more perceptually important)
-    // Common weights: Y=0.8, U=0.1, V=0.1 or Y=6, U=1, V=1
-    let ssim_avg = (6.0 * ssim_y + ssim_u + ssim_v) / 8.0;
-
-    Ok((ssim_y, ssim_u, ssim_v, ssim_avg))
-}
 
 /// Open a demuxer for the given file
 fn open_demuxer_for_ssim(
@@ -2566,14 +2299,3 @@ fn find_video_stream(
     }
 }
 
-/// Convert SSIM to dB scale
-/// dB = -10 * log10(1 - SSIM)
-fn ssim_to_db(ssim: f64) -> f64 {
-    if ssim >= 1.0 {
-        return f64::INFINITY;
-    }
-    if ssim <= 0.0 {
-        return 0.0;
-    }
-    -10.0 * (1.0 - ssim).log10()
-}

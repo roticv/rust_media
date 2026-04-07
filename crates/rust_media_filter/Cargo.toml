@@ -1,0 +1,11 @@
+[package]
+name = "rust_media_filter"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Filter implementations for rust_media - audio resampling, SSIM, and more"
+
+[dependencies]
+rust_media_core = { workspace = true }
