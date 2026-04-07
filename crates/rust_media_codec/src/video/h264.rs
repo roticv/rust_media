@@ -18,6 +18,7 @@
 //! - Supports both AVCC format (MP4) and Annex B format (raw H.264)
 //! - Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
 //! - Proper flush handling for B-frames and buffered data
+//! - POC-based frame reordering for correct display order (matching play.rs reference)
 //!
 //! # Example
 //!
@@ -35,17 +36,58 @@
 //! ```
 
 use rust_h264::decoder::Decoder as RustH264Decoder;
-use rust_h264::nal::parse_annex_b;
+use rust_h264::nal::{parse_annex_b, NalUnitType};
 use rust_media_core::{
     Decoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
 };
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
 
 /// Annex B start code (4-byte version)
 const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 
+/// Max number of frames to buffer before forcing output from the reorder buffer.
+const REORDER_BUFFER_DEPTH: usize = 4;
+
+/// A decoded frame with its POC and IDR epoch, for POC-based reordering.
+struct PocFrame {
+    frame: Frame,
+    idr_count: u32,
+    poc: i32,
+}
+
+impl PartialEq for PocFrame {
+    fn eq(&self, other: &Self) -> bool {
+        (self.idr_count, self.poc) == (other.idr_count, other.poc)
+    }
+}
+
+impl Eq for PocFrame {}
+
+impl PartialOrd for PocFrame {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PocFrame {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse for min-heap (BinaryHeap is max-heap)
+        (other.idr_count, other.poc).cmp(&(self.idr_count, self.poc))
+    }
+}
+
 /// H.264/AVC video decoder using rust_h264
 ///
 /// Decodes H.264-compressed video packets into raw YUV frames.
+///
+/// # Frame Reordering
+///
+/// With B-frames, the decoder outputs frames in decode order which differs from
+/// display order. This decoder uses a POC-based reorder buffer (matching the
+/// reference play.rs implementation) to emit frames in correct display order.
+/// PTS values from input packets are collected and assigned to output frames
+/// in display order.
 ///
 /// # MP4 Support
 ///
@@ -62,7 +104,8 @@ const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 pub struct H264Decoder {
     stream_info: StreamInfo,
     decoder: RustH264Decoder,
-    buffered_frames: Vec<Frame>,
+    /// Frames ready for output (already in display order with correct PTS)
+    output_frames: Vec<Frame>,
     flushed: bool,
     /// NAL unit length size in bytes (1, 2, or 4) from AVCDecoderConfigurationRecord
     nal_length_size: usize,
@@ -72,6 +115,16 @@ pub struct H264Decoder {
     pps_list: Vec<Vec<u8>>,
     /// Whether we've sent the SPS/PPS to the decoder
     sent_sps_pps: bool,
+    /// POC-based reorder buffer (min-heap by (idr_count, poc))
+    reorder_buf: BinaryHeap<PocFrame>,
+    /// Current IDR epoch counter - incremented at each IDR boundary
+    idr_count: u32,
+    /// PTS values from input packets, sorted ascending (min-heap).
+    /// Popped in ascending order and assigned to frames as they leave the
+    /// reorder buffer in display order.
+    pts_heap: BinaryHeap<std::cmp::Reverse<i64>>,
+    /// Count of packets with no PTS (assigned after all timestamped frames)
+    pts_none_count: usize,
 }
 
 impl H264Decoder {
@@ -106,12 +159,16 @@ impl H264Decoder {
         Ok(Self {
             stream_info,
             decoder,
-            buffered_frames: Vec::new(),
+            output_frames: Vec::new(),
             flushed: false,
             nal_length_size,
             sps_list,
             pps_list,
             sent_sps_pps: false,
+            reorder_buf: BinaryHeap::new(),
+            idr_count: 0,
+            pts_heap: BinaryHeap::new(),
+            pts_none_count: 0,
         })
     }
 
@@ -189,16 +246,12 @@ impl H264Decoder {
         Ok(())
     }
 
-    /// Convert a rust_h264 Frame to a rust_media_core Frame
-    fn convert_frame(
-        h264_frame: &rust_h264::decoder::Frame,
-        pts: Option<i64>,
-    ) -> Result<Frame> {
+    /// Convert a rust_h264 Frame to a rust_media_core Frame (without PTS - assigned later)
+    fn convert_frame(h264_frame: &rust_h264::decoder::Frame) -> Result<Frame> {
         let width = h264_frame.width as usize;
         let height = h264_frame.height as usize;
 
         let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
-        frame.set_pts(pts);
 
         // Copy Y plane
         let y_plane = frame
@@ -219,6 +272,40 @@ impl H264Decoder {
         v_plane.copy_from_slice(&h264_frame.v);
 
         Ok(frame)
+    }
+
+    /// Pop the next PTS value (smallest) from the heap and assign to a frame.
+    fn pop_pts_for_frame(&mut self, frame: &mut Frame) {
+        if let Some(std::cmp::Reverse(pts)) = self.pts_heap.pop() {
+            frame.set_pts(Some(pts));
+        } else if self.pts_none_count > 0 {
+            self.pts_none_count -= 1;
+            frame.set_pts(None);
+        }
+    }
+
+    /// Emit frames from the reorder buffer when it exceeds the max depth.
+    /// PTS is assigned immediately as frames leave the buffer.
+    fn drain_reorder_ready(&mut self) {
+        while self.reorder_buf.len() > REORDER_BUFFER_DEPTH {
+            if let Some(pf) = self.reorder_buf.pop() {
+                let mut frame = pf.frame;
+                self.pop_pts_for_frame(&mut frame);
+                self.output_frames.push(frame);
+            }
+        }
+    }
+
+    /// Flush the reorder buffer completely, emitting all frames in display order
+    /// with PTS assigned immediately.
+    fn flush_reorder_buf(&mut self) {
+        let mut frames: Vec<_> = self.reorder_buf.drain().collect();
+        frames.sort_by_key(|pf| (pf.idr_count, pf.poc));
+        for pf in frames {
+            let mut frame = pf.frame;
+            self.pop_pts_for_frame(&mut frame);
+            self.output_frames.push(frame);
+        }
     }
 }
 
@@ -326,6 +413,12 @@ impl Decoder for H264Decoder {
         let pts = packet.pts();
         let data = packet.data();
 
+        // Collect PTS for later assignment in display order
+        match pts {
+            Some(p) => self.pts_heap.push(std::cmp::Reverse(p)),
+            None => self.pts_none_count += 1,
+        }
+
         // Convert from AVCC to Annex B format if needed
         let annex_b_data = if self.nal_length_size > 0 {
             self.avcc_to_annex_b(data)
@@ -336,26 +429,40 @@ impl Decoder for H264Decoder {
         // Parse NAL units and feed to decoder
         let nals = parse_annex_b(&annex_b_data);
         for nal in &nals {
+            let is_idr = nal.nal_unit_type == NalUnitType::SliceIdr;
+
             match self.decoder.decode_nal(nal) {
                 Ok(Some(h264_frame)) => {
-                    let frame = Self::convert_frame(&h264_frame, pts)?;
-                    self.buffered_frames.push(frame);
+                    let frame = Self::convert_frame(&h264_frame)?;
+                    self.reorder_buf.push(PocFrame {
+                        frame,
+                        idr_count: self.idr_count,
+                        poc: h264_frame.pic_order_cnt,
+                    });
                 }
-                Ok(None) => {
-                    // No frame available yet (need more data or buffered for reordering)
-                }
+                Ok(None) => {}
                 Err(e) => {
                     return Err(Error::Decode(format!("H.264 decode error: {}", e)));
                 }
             }
+
+            // After processing, handle IDR boundary: increment epoch and
+            // flush reorder buffer for the completed GOP
+            if is_idr {
+                self.idr_count += 1;
+                self.flush_reorder_buf();
+            }
         }
+
+        // Emit frames when reorder buffer is full enough
+        self.drain_reorder_ready();
 
         Ok(())
     }
 
     fn receive_frame(&mut self) -> Result<Frame> {
-        if !self.buffered_frames.is_empty() {
-            Ok(self.buffered_frames.remove(0))
+        if !self.output_frames.is_empty() {
+            Ok(self.output_frames.remove(0))
         } else if self.flushed {
             Err(Error::EndOfStream)
         } else {
@@ -365,11 +472,18 @@ impl Decoder for H264Decoder {
 
     fn flush(&mut self) -> Result<()> {
         // Flush remaining frames from the decoder
-        if let Some(h264_frame) = self.decoder.flush() {
-            if let Ok(frame) = Self::convert_frame(&h264_frame, None) {
-                self.buffered_frames.push(frame);
+        while let Some(h264_frame) = self.decoder.flush() {
+            if let Ok(frame) = Self::convert_frame(&h264_frame) {
+                self.reorder_buf.push(PocFrame {
+                    frame,
+                    idr_count: self.idr_count,
+                    poc: h264_frame.pic_order_cnt,
+                });
             }
         }
+
+        // Flush remaining frames from the reorder buffer (PTS assigned inline)
+        self.flush_reorder_buf();
 
         self.flushed = true;
         Ok(())
@@ -377,7 +491,11 @@ impl Decoder for H264Decoder {
 
     fn reset(&mut self) -> Result<()> {
         self.decoder = RustH264Decoder::new();
-        self.buffered_frames.clear();
+        self.output_frames.clear();
+        self.reorder_buf.clear();
+        self.pts_heap.clear();
+        self.pts_none_count = 0;
+        self.idr_count = 0;
         self.flushed = false;
         self.sent_sps_pps = false;
         Ok(())
