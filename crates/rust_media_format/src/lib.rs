@@ -3,20 +3,24 @@
 //! This crate provides implementations of container format demuxers and muxers:
 //! - **WAV** (RIFF WAVE) - ✅ Demuxer + Muxer
 //! - **WebM** (Matroska subset) - ✅ Demuxer + Muxer
-//! - **MP4** (ISO Base Media File Format) - ✅ Muxer
+//! - **MP4** (ISO Base Media File Format) - ✅ Demuxer + Muxer
 //! - MKV (Matroska) - Planned
 //!
 //! All implementations use streaming APIs for bounded memory usage.
+//!
+//! # Format Detection
+//!
+//! The `detect` module provides format identification from magic bytes and/or
+//! file extensions. Use `detect::detect()` for combined detection.
 
+pub mod detect;
 pub mod mp4;
 pub mod wav;
 pub mod webm;
 
-// Placeholder modules for future implementations
-// pub mod mkv;
-
-// Re-export commonly used demuxers and muxers
-pub use mp4::Mp4Muxer;
+// Re-export commonly used types
+pub use detect::{detect_format, detect_format_by_extension, detect_format_by_path, ContainerFormat};
+pub use mp4::{Mp4Demuxer, Mp4Muxer};
 pub use wav::{WavDemuxer, WavMuxer};
 pub use webm::{WebmDemuxer, WebmMuxer};
 

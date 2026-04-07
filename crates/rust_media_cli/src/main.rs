@@ -10,6 +10,7 @@ use rust_media::{
     AudioStreamParams, Decoder, Demuxer, Encoder, Frame, FrameReorderBuffer, MediaType, Muxer,
     Packet, PixelFormat, SampleFormat, StreamInfo, StreamParams, VideoStreamParams,
 };
+use rust_media_format::detect::ContainerFormat;
 use rust_media_format::mp4::{Mp4Demuxer, Mp4Muxer};
 use rust_media_format::wav::{WavDemuxer, WavMuxer};
 use rust_media_format::webm::{WebmDemuxer, WebmMuxer};
@@ -572,14 +573,10 @@ fn run_transform(
     let input_filename = input.to_string_lossy().to_string();
     let output_filename = output.to_string_lossy().to_string();
 
-    // Detect input format
-    let input_ext = input
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    // Detect formats
+    let (input_demuxer, input_format) = open_demuxer(input)?;
+    let input_ext = input_format.name().to_string();
 
-    // Detect output format
     let output_ext = output
         .extension()
         .and_then(|e| e.to_str())
@@ -589,33 +586,11 @@ fn run_transform(
     println!("Input:  {} ({})", input_filename, input_ext);
     println!("Output: {} ({})", output_filename, output_ext);
 
-    // Open demuxer and get streams
-    let (streams, duration) = match input_ext.as_str() {
-        "mp4" | "m4a" | "m4v" | "mov" => {
-            let file = File::open(&input_filename)?;
-            let reader = BufReader::new(file);
-            let demuxer = Mp4Demuxer::new(reader)?;
-            let container = demuxer.container_info()?;
-            (demuxer.streams()?, container.duration)
-        }
-        "webm" => {
-            let file = File::open(&input_filename)?;
-            let reader = BufReader::new(file);
-            let demuxer = WebmDemuxer::open(reader)?;
-            let container = demuxer.container_info()?;
-            (demuxer.streams()?, container.duration)
-        }
-        "wav" => {
-            let file = File::open(&input_filename)?;
-            let reader = BufReader::new(file);
-            let demuxer = WavDemuxer::open(reader)?;
-            let container = demuxer.container_info()?;
-            (demuxer.streams()?, container.duration)
-        }
-        _ => {
-            return Err(format!("Unsupported input format: {}", input_ext).into());
-        }
-    };
+    // Get streams and duration
+    let container = input_demuxer.container_info()?;
+    let streams = input_demuxer.streams()?;
+    let duration = container.duration;
+    drop(input_demuxer); // Close; will reopen in transcode pipeline
 
     // Find video and audio streams
     let video_stream = if no_video {
@@ -771,7 +746,6 @@ fn run_transform(
         "mp4" | "m4a" | "m4v" | "mov" => {
             transcode_to_mp4(
                 &input_filename,
-                &input_ext,
                 &output_filename,
                 video_stream,
                 audio_stream,
@@ -788,7 +762,6 @@ fn run_transform(
         "webm" => {
             transcode_to_webm(
                 &input_filename,
-                &input_ext,
                 &output_filename,
                 video_stream,
                 audio_stream,
@@ -805,7 +778,6 @@ fn run_transform(
         "wav" => {
             transcode_to_wav(
                 &input_filename,
-                &input_ext,
                 &output_filename,
                 audio_stream,
                 audio_codec,
@@ -835,7 +807,6 @@ fn run_transform(
 #[allow(clippy::too_many_arguments)]
 fn transcode_to_mp4(
     input_filename: &str,
-    input_ext: &str,
     output_filename: &str,
     video_stream: Option<StreamInfo>,
     audio_stream: Option<StreamInfo>,
@@ -909,7 +880,6 @@ fn transcode_to_mp4(
     // Create the transcode pipeline
     run_transcode_pipeline(
         input_filename,
-        input_ext,
         &mut muxer,
         video_stream,
         audio_stream,
@@ -938,7 +908,6 @@ fn transcode_to_mp4(
 #[allow(clippy::too_many_arguments)]
 fn transcode_to_webm(
     input_filename: &str,
-    input_ext: &str,
     output_filename: &str,
     video_stream: Option<StreamInfo>,
     audio_stream: Option<StreamInfo>,
@@ -1023,7 +992,6 @@ fn transcode_to_webm(
     // Create the transcode pipeline
     run_transcode_pipeline(
         input_filename,
-        input_ext,
         &mut muxer,
         video_stream,
         audio_stream,
@@ -1051,7 +1019,6 @@ fn transcode_to_webm(
 
 fn transcode_to_wav(
     input_filename: &str,
-    input_ext: &str,
     output_filename: &str,
     audio_stream: Option<StreamInfo>,
     audio_codec: &str,
@@ -1081,59 +1048,25 @@ fn transcode_to_wav(
     let mut decoder = create_decoder_for_stream(&audio_stream)?;
 
     // Open demuxer
-    match input_ext {
-        "mp4" | "m4a" | "m4v" | "mov" => {
-            let file = File::open(input_filename)?;
-            let reader = BufReader::new(file);
-            let mut demuxer = Mp4Demuxer::new(reader)?;
-            process_audio_to_wav(
-                &mut demuxer,
-                &mut decoder,
-                &mut muxer,
-                audio_stream.index,
-                duration,
-                progress,
-                audio_stream.time_base,
-            )?;
-        }
-        "webm" => {
-            let file = File::open(input_filename)?;
-            let reader = BufReader::new(file);
-            let mut demuxer = WebmDemuxer::open(reader)?;
-            process_audio_to_wav(
-                &mut demuxer,
-                &mut decoder,
-                &mut muxer,
-                audio_stream.index,
-                duration,
-                progress,
-                audio_stream.time_base,
-            )?;
-        }
-        "wav" => {
-            let file = File::open(input_filename)?;
-            let reader = BufReader::new(file);
-            let mut demuxer = WavDemuxer::open(reader)?;
-            process_audio_to_wav(
-                &mut demuxer,
-                &mut decoder,
-                &mut muxer,
-                audio_stream.index,
-                duration,
-                progress,
-                audio_stream.time_base,
-            )?;
-        }
-        _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
-    }
+    let input_path = std::path::Path::new(input_filename);
+    let (mut demuxer, _) = open_demuxer(input_path)?;
+    process_audio_to_wav(
+        &mut *demuxer,
+        &mut decoder,
+        &mut muxer,
+        audio_stream.index,
+        duration,
+        progress,
+        audio_stream.time_base,
+    )?;
 
     muxer.write_trailer()?;
     muxer.flush()?;
     Ok(())
 }
 
-fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
-    demuxer: &mut D,
+fn process_audio_to_wav<W: std::io::Write + std::io::Seek>(
+    demuxer: &mut dyn Demuxer,
     decoder: &mut Box<dyn DecoderWrapper>,
     muxer: &mut WavMuxer<W>,
     audio_stream_idx: usize,
@@ -1217,7 +1150,6 @@ fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
 #[allow(clippy::too_many_arguments)]
 fn run_transcode_pipeline<M: Muxer>(
     input_filename: &str,
-    input_ext: &str,
     muxer: &mut M,
     video_stream: Option<StreamInfo>,
     audio_stream: Option<StreamInfo>,
@@ -1285,93 +1217,31 @@ fn run_transcode_pipeline<M: Muxer>(
     };
 
     // Open input demuxer and process
-    match input_ext {
-        "mp4" | "m4a" | "m4v" | "mov" => {
-            let file = File::open(input_filename)?;
-            let reader = BufReader::new(file);
-            let mut demuxer = Mp4Demuxer::new(reader)?;
+    let input_path = std::path::Path::new(input_filename);
+    let (mut demuxer, _) = open_demuxer(input_path)?;
 
-            process_packets(
-                &mut demuxer,
-                muxer,
-                video_in_idx,
-                audio_in_idx,
-                video_out_idx,
-                audio_out_idx,
-                &mut video_decoder,
-                &mut video_encoder,
-                &mut audio_decoder,
-                &mut audio_encoder,
-                video_codec,
-                audio_codec,
-                duration,
-                progress,
-                &mut packet_count,
-                &mut frame_count,
-                &mut progress_state,
-                &stream_time_bases,
-                ssim_filter,
-                audio_resampler,
-            )?;
-        }
-        "webm" => {
-            let file = File::open(input_filename)?;
-            let reader = BufReader::new(file);
-            let mut demuxer = WebmDemuxer::open(reader)?;
-
-            process_packets(
-                &mut demuxer,
-                muxer,
-                video_in_idx,
-                audio_in_idx,
-                video_out_idx,
-                audio_out_idx,
-                &mut video_decoder,
-                &mut video_encoder,
-                &mut audio_decoder,
-                &mut audio_encoder,
-                video_codec,
-                audio_codec,
-                duration,
-                progress,
-                &mut packet_count,
-                &mut frame_count,
-                &mut progress_state,
-                &stream_time_bases,
-                ssim_filter,
-                audio_resampler,
-            )?;
-        }
-        "wav" => {
-            let file = File::open(input_filename)?;
-            let reader = BufReader::new(file);
-            let mut demuxer = WavDemuxer::open(reader)?;
-
-            process_packets(
-                &mut demuxer,
-                muxer,
-                video_in_idx,
-                audio_in_idx,
-                video_out_idx,
-                audio_out_idx,
-                &mut video_decoder,
-                &mut video_encoder,
-                &mut audio_decoder,
-                &mut audio_encoder,
-                video_codec,
-                audio_codec,
-                duration,
-                progress,
-                &mut packet_count,
-                &mut frame_count,
-                &mut progress_state,
-                &stream_time_bases,
-                ssim_filter,
-                audio_resampler,
-            )?;
-        }
-        _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
-    }
+    process_packets(
+        &mut *demuxer,
+        muxer,
+        video_in_idx,
+        audio_in_idx,
+        video_out_idx,
+        audio_out_idx,
+        &mut video_decoder,
+        &mut video_encoder,
+        &mut audio_decoder,
+        &mut audio_encoder,
+        video_codec,
+        audio_codec,
+        duration,
+        progress,
+        &mut packet_count,
+        &mut frame_count,
+        &mut progress_state,
+        &stream_time_bases,
+        ssim_filter,
+        audio_resampler,
+    )?;
 
     if let Some(ps) = &mut progress_state {
         ps.finish();
@@ -1388,8 +1258,8 @@ fn run_transcode_pipeline<M: Muxer>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_packets<D: Demuxer, M: Muxer>(
-    demuxer: &mut D,
+fn process_packets<M: Muxer>(
+    demuxer: &mut dyn Demuxer,
     muxer: &mut M,
     video_in_idx: Option<usize>,
     audio_in_idx: Option<usize>,
@@ -1727,6 +1597,33 @@ impl<E: Encoder> EncoderWrapper for E {
 }
 
 // ============================================================================
+// Demuxer opening with format detection
+// ============================================================================
+
+/// Open a demuxer for the given file path, using magic bytes + extension detection.
+fn open_demuxer(
+    path: &std::path::Path,
+) -> Result<(Box<dyn Demuxer>, ContainerFormat), Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+
+    let format = rust_media_format::detect::detect(&mut reader, path).ok_or_else(|| {
+        format!(
+            "Unrecognized format for '{}'. Supported: mp4, mov, m4a, m4v, webm, mkv, wav",
+            path.display()
+        )
+    })?;
+
+    let demuxer: Box<dyn Demuxer> = match format {
+        ContainerFormat::Mp4 => Box::new(Mp4Demuxer::new(reader)?),
+        ContainerFormat::WebM => Box::new(WebmDemuxer::open(reader)?),
+        ContainerFormat::Wav => Box::new(WavDemuxer::open(reader)?),
+    };
+
+    Ok((demuxer, format))
+}
+
+// ============================================================================
 // Decoder/Encoder creation functions
 // ============================================================================
 
@@ -1891,35 +1788,7 @@ fn run_info(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let filename = input.to_string_lossy().to_string();
 
-    // Detect format from extension
-    let extension = input
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Open the appropriate demuxer
-    let mut demuxer: Box<dyn Demuxer> = match extension.as_str() {
-        "mp4" | "m4a" | "m4v" | "mov" => {
-            let file = File::open(&filename)?;
-            Box::new(Mp4Demuxer::new(BufReader::new(file))?)
-        }
-        "webm" => {
-            let file = File::open(&filename)?;
-            Box::new(WebmDemuxer::open(BufReader::new(file))?)
-        }
-        "wav" => {
-            let file = File::open(&filename)?;
-            Box::new(WavDemuxer::open(BufReader::new(file))?)
-        }
-        _ => {
-            return Err(format!(
-                "Unsupported format: {}. Supported: mp4, m4a, m4v, mov, webm, wav",
-                extension
-            )
-            .into())
-        }
-    };
+    let (mut demuxer, _format) = open_demuxer(input)?;
 
     let container = demuxer.container_info()?;
     let raw_streams = demuxer.streams()?;
