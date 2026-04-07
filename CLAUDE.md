@@ -101,7 +101,7 @@ rust_media/
 │   │
 │   ├── rust_media_filter/  # Filter implementations
 │   │   ├── Video: SSIM ✅; scale, crop, overlay, rotate (planned)
-│   │   ├── Audio: resample ✅; mix, volume (planned)
+│   │   ├── Audio: resample ✅, volume ✅; mix (planned)
 │   │   └── Filter graph parsing (FFmpeg-like syntax) ✅
 │   │
 │   ├── rust_media/         # Main library (re-exports)
@@ -118,7 +118,7 @@ rust_media/
 - **rust_media_core**: Foundation - all other crates depend on this
 - **rust_media_format**: Implements Demuxer and Muxer traits for containers
 - **rust_media_codec**: Implements Decoder and Encoder traits for codecs
-- **rust_media_filter**: Filter graph parsing + filter implementations (resampling, SSIM, etc.)
+- **rust_media_filter**: Filter graph parsing + filter implementations (resampling, volume, SSIM, etc.)
 - **rust_media**: Main public API - users typically only need this
 - **rust_media_cli**: Binary executable for command-line usage
 
@@ -335,19 +335,22 @@ Build a flexible filtering system that:
 - Handles video and audio processing
 - Enables common operations (scaling, cropping, mixing, etc.)
 
-**Status**: Foundation implemented in `rust_media_filter` crate. FFmpeg-like filter graph parsing, audio resampling, and SSIM video quality metric are available. More filters planned.
+**Status**: Foundation implemented in `rust_media_filter` crate. Filter graph parsing, audio resampling (sinc), volume, and SSIM video quality metric are available. Auto-resampling on sample rate mismatch. More filters planned.
 
 **Implemented**:
 - **Filter graph parsing**: FFmpeg-like syntax (`filter_name=param1=value1:param2=value2`, comma-separated chains)
-- **aresample**: Audio resampling via linear interpolation (e.g., 44100 Hz → 48000 Hz)
+- **aresample**: Audio resampling via sinc interpolation (rubato, Kaiser-windowed polyphase filter)
+- **volume**: Audio volume/gain adjustment (linear factor or dB, e.g., `volume=0.5`, `volume=6dB`)
 - **ssim**: SSIM quality comparison between two video streams
+- **Auto-resample**: Automatically resamples when encoder requires a different sample rate (e.g., MP3 44100 Hz → Opus 48000 Hz)
+- **Format detection**: Magic bytes detection with file extension fallback (`rust_media_format::detect`)
 - CLI integration via `--af` (audio filters) and `--vf` (video filters)
 
 **Key Requirements** (for future filters):
 - **Streaming API**: Filters must operate on frames incrementally (send/receive pattern)
 - **Graph construction**: Support both programmatic and CLI-based filter graph creation
 - **Zero-copy where possible**: Minimize frame copying in filter chains
-- **Common filters**: Scale, crop, overlay, rotate, format conversion, audio mixing, volume
+- **Common filters**: Scale, crop, overlay, rotate, format conversion, audio mixing
 
 #### 6. FFmpeg CLI Compatibility 🚧 PLANNED
 Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing migration and adoption.

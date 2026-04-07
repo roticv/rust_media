@@ -8,7 +8,8 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MP4 ✅ demuxer + muxer, MKV planned)
 - **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, AAC ✅; AV1 planned)
-- **Filter** support (audio resampling ✅, SSIM quality metric ✅)
+- **Filter** support (audio resampling ✅, volume ✅, SSIM quality metric ✅)
+- **Format detection** from magic bytes with file extension fallback
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -16,7 +17,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 This is a Cargo workspace with multiple crates:
 
 - **[rust_media_core](crates/rust_media_core)** - Core types (Packet, Frame) and traits (Demuxer, Decoder, Encoder, Muxer)
-- **[rust_media_format](crates/rust_media_format)** - Container format implementations
+- **[rust_media_format](crates/rust_media_format)** - Container format implementations + format detection
 - **[rust_media_codec](crates/rust_media_codec)** - Codec implementations
 - **[rust_media_filter](crates/rust_media_filter)** - Filter implementations (resampling, SSIM, etc.)
 - **[rust_media](crates/rust_media)** - Main library that re-exports all components
@@ -86,6 +87,7 @@ This project is in active development. Current status:
 - ✅ Core data structures (Packet, Frame)
 - ✅ Trait definitions (Demuxer, Decoder, Encoder, Muxer)
 - ✅ Workspace structure
+- ✅ Format detection from magic bytes + file extension fallback
 
 ### Container Formats
 - ✅ **WAV** demuxer + muxer (PCM audio)
@@ -106,8 +108,10 @@ This project is in active development. Current status:
 - 📋 AV1 codec - Planned
 
 ### Filters
-- ✅ **aresample** - Audio resampling (linear interpolation)
+- ✅ **aresample** - Audio resampling (sinc interpolation via rubato)
+- ✅ **volume** - Audio volume/gain adjustment (linear or dB)
 - ✅ **ssim** - Video SSIM quality comparison
+- ✅ Auto-resample when encoder requires a different sample rate
 
 ### CLI Tool
 - ✅ **info** - Analyze media files (similar to ffprobe)
@@ -120,8 +124,10 @@ This project is in active development. Current status:
   - Audio transcoding (Opus, AAC, PCM)
   - Stream copy (passthrough)
   - Bitrate control
-  - Audio filters: resampling (`--af aresample=48000`)
-  - Video filters: SSIM quality comparison (`--vf ssim`)
+  - Audio filters (`--af`): resampling, volume (`--af "volume=0.5,aresample=48000"`)
+  - Video filters (`--vf`): SSIM quality comparison (`--vf ssim`)
+  - Auto-resampling when encoder requires a different sample rate
+  - ffmpeg-style progress output (`--progress`)
   - See [rust_media_cli documentation](crates/rust_media_cli/README.md) for details
 
 ## Optional Features
