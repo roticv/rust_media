@@ -112,6 +112,17 @@ enum Commands {
         ///       print_per_frame   - Print per-frame SSIM values (optional)
         #[arg(long = "vf", visible_alias = "video-filter")]
         video_filter: Option<String>,
+
+        /// Audio filter graph (e.g., "aresample=48000")
+        ///
+        /// Filters are specified as: filter_name=param1=value1:param2=value2
+        /// Multiple filters can be chained with commas: filter1,filter2
+        ///
+        /// Available filters:
+        ///   aresample=<sample_rate> - Resample audio to target sample rate
+        ///     Example: aresample=48000
+        #[arg(long = "af", visible_alias = "audio-filter")]
+        audio_filter: Option<String>,
     },
 }
 
@@ -320,6 +331,92 @@ impl VideoFilter {
     /// Check if a flag parameter is set
     fn has_flag(&self, key: &str) -> bool {
         self.params.get(key).map(|v| v == "true" || v == "1").unwrap_or(false)
+    }
+}
+
+// ============================================================================
+// Audio resampler
+// ============================================================================
+
+/// Linear interpolation audio resampler
+struct AudioResampler {
+    target_sample_rate: u32,
+}
+
+impl AudioResampler {
+    fn new(target_sample_rate: u32) -> Self {
+        Self { target_sample_rate }
+    }
+
+    /// Resample an audio frame to the target sample rate.
+    /// Uses linear interpolation on interleaved S16 samples.
+    fn resample(&self, frame: &Frame) -> Result<Frame, Box<dyn std::error::Error>> {
+        let params = frame
+            .audio_params()
+            .ok_or("Not an audio frame")?;
+
+        let src_rate = params.sample_rate;
+        let dst_rate = self.target_sample_rate;
+
+        if src_rate == dst_rate {
+            return Ok(frame.clone());
+        }
+
+        let channels = params.channels;
+        let src_samples = params.num_samples;
+        let dst_samples = ((src_samples as u64 * dst_rate as u64) / src_rate as u64) as usize;
+
+        if dst_samples == 0 {
+            return Ok(frame.clone());
+        }
+
+        // Read source interleaved i16 samples
+        let src_data = frame.plane(0).ok_or("Missing audio data")?;
+        let src_len = src_samples * channels;
+        let mut src_i16 = Vec::with_capacity(src_len);
+        for i in 0..src_len {
+            let lo = src_data[i * 2];
+            let hi = src_data[i * 2 + 1];
+            src_i16.push(i16::from_le_bytes([lo, hi]));
+        }
+
+        // Resample each channel via linear interpolation
+        let mut dst_i16 = vec![0i16; dst_samples * channels];
+        let ratio = src_rate as f64 / dst_rate as f64;
+
+        for dst_idx in 0..dst_samples {
+            let src_pos = dst_idx as f64 * ratio;
+            let src_idx = src_pos as usize;
+            let frac = src_pos - src_idx as f64;
+
+            for ch in 0..channels {
+                let s0 = src_i16[src_idx * channels + ch] as f64;
+                let s1 = if src_idx + 1 < src_samples {
+                    src_i16[(src_idx + 1) * channels + ch] as f64
+                } else {
+                    s0
+                };
+                let interpolated = s0 + frac * (s1 - s0);
+                dst_i16[dst_idx * channels + ch] =
+                    interpolated.round().clamp(-32768.0, 32767.0) as i16;
+            }
+        }
+
+        // Build output frame
+        let mut out = Frame::new_audio(dst_rate, channels, SampleFormat::S16, dst_samples);
+        let out_data = out.plane_mut(0).ok_or("Missing output data")?;
+        for (i, &sample) in dst_i16.iter().enumerate() {
+            let bytes = sample.to_le_bytes();
+            out_data[i * 2] = bytes[0];
+            out_data[i * 2 + 1] = bytes[1];
+        }
+
+        // Preserve PTS
+        out.set_pts(frame.pts());
+        let duration = (dst_samples as u64 * 1_000_000) / dst_rate as u64;
+        out = out.with_duration(duration as i64);
+
+        Ok(out)
     }
 }
 
@@ -596,6 +693,7 @@ fn main() {
             no_audio,
             progress,
             video_filter,
+            audio_filter,
         } => {
             if let Err(e) = run_transform(
                 &inputs,
@@ -610,6 +708,7 @@ fn main() {
                 no_audio,
                 progress,
                 video_filter.as_deref(),
+                audio_filter.as_deref(),
             ) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -636,6 +735,7 @@ fn run_transform(
     no_audio: bool,
     progress: bool,
     video_filter: Option<&str>,
+    audio_filter: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = inputs.first().ok_or("At least one input file is required")?;
     let input_filename = input.to_string_lossy().to_string();
@@ -700,7 +800,7 @@ fn run_transform(
             })
     };
 
-    let audio_stream = if no_audio {
+    let mut audio_stream = if no_audio {
         None
     } else {
         audio_stream_idx
@@ -774,6 +874,47 @@ fn run_transform(
         }
     }
 
+    // Parse audio filter graph
+    let mut audio_resampler: Option<AudioResampler> = None;
+
+    if let Some(filter_str) = audio_filter {
+        let filter_graph = FilterGraph::parse(filter_str)
+            .map_err(|e| format!("Failed to parse audio filter graph: {}", e))?;
+
+        for filter in &filter_graph.filters {
+            match filter.name.as_str() {
+                "aresample" => {
+                    // aresample=48000 or aresample=sample_rate=48000
+                    let rate_str = filter
+                        .get_param("sample_rate")
+                        .or_else(|| {
+                            // Handle positional arg: "aresample=48000" parses as key="48000" value="true"
+                            filter.params.keys()
+                                .find(|k| k.parse::<u32>().is_ok())
+                                .map(|k| k.as_str())
+                        })
+                        .ok_or("aresample filter requires a sample rate (e.g., aresample=48000)")?;
+                    let target_rate: u32 = rate_str
+                        .parse()
+                        .map_err(|_| format!("Invalid sample rate: {}", rate_str))?;
+                    println!("Filter: aresample (target {} Hz)", target_rate);
+                    audio_resampler = Some(AudioResampler::new(target_rate));
+
+                    // Update audio stream sample rate for encoder
+                    if let Some(ref mut aus) = audio_stream {
+                        if let StreamParams::Audio(ref mut ap) = aus.params {
+                            ap.sample_rate = target_rate;
+                        }
+                        aus.time_base = (1, target_rate);
+                    }
+                }
+                _ => {
+                    return Err(format!("Unknown audio filter: {}", filter.name).into());
+                }
+            }
+        }
+    }
+
     // Perform the actual transcoding
     match output_ext.as_str() {
         "mp4" | "m4a" | "m4v" | "mov" => {
@@ -790,6 +931,7 @@ fn run_transform(
                 duration,
                 progress,
                 &mut ssim_filter,
+                &audio_resampler,
             )?;
         }
         "webm" => {
@@ -806,6 +948,7 @@ fn run_transform(
                 duration,
                 progress,
                 &mut ssim_filter,
+                &audio_resampler,
             )?;
         }
         "wav" => {
@@ -852,6 +995,7 @@ fn transcode_to_mp4(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
+    audio_resampler: &Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let mut writer = BufWriter::new(output_file);
@@ -927,6 +1071,7 @@ fn transcode_to_mp4(
         duration,
         progress,
         ssim_filter,
+        audio_resampler,
     )?;
 
     muxer.write_trailer()?;
@@ -953,6 +1098,7 @@ fn transcode_to_webm(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
+    audio_resampler: &Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let writer = BufWriter::new(output_file);
@@ -1039,6 +1185,7 @@ fn transcode_to_webm(
         duration,
         progress,
         ssim_filter,
+        audio_resampler,
     )?;
 
     muxer.write_trailer()?;
@@ -1220,6 +1367,7 @@ fn run_transcode_pipeline<M: Muxer>(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
+    audio_resampler: &Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create decoders and encoders
     let mut video_decoder: Option<Box<dyn DecoderWrapper>> = None;
@@ -1276,6 +1424,7 @@ fn run_transcode_pipeline<M: Muxer>(
                 &mut frame_count,
                 start_time,
                 ssim_filter,
+                audio_resampler,
             )?;
         }
         "webm" => {
@@ -1302,6 +1451,7 @@ fn run_transcode_pipeline<M: Muxer>(
                 &mut frame_count,
                 start_time,
                 ssim_filter,
+                audio_resampler,
             )?;
         }
         "wav" => {
@@ -1328,6 +1478,7 @@ fn run_transcode_pipeline<M: Muxer>(
                 &mut frame_count,
                 start_time,
                 ssim_filter,
+                audio_resampler,
             )?;
         }
         _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
@@ -1367,6 +1518,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
     frame_count: &mut usize,
     start_time: std::time::Instant,
     ssim_filter: &mut Option<SsimFilterContext>,
+    audio_resampler: &Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reorder buffer for video frames (B-frame decode order → PTS order)
     let mut reorder_buf = FrameReorderBuffer::new();
@@ -1441,10 +1593,15 @@ fn process_packets<D: Demuxer, M: Muxer>(
                         } else if let (Some(decoder), Some(encoder)) =
                             (audio_decoder.as_mut(), audio_encoder.as_mut())
                         {
-                            // Transcode
+                            // Transcode (with optional resampling)
                             decoder.send_packet(&packet)?;
                             while let Ok(frame) = decoder.receive_frame() {
                                 *frame_count += 1;
+                                let frame = if let Some(resampler) = audio_resampler {
+                                    resampler.resample(&frame)?
+                                } else {
+                                    frame
+                                };
                                 encoder.send_frame(&frame)?;
                                 while let Ok(mut enc_packet) = encoder.receive_packet() {
                                     enc_packet.set_stream_index(out_idx);
@@ -1500,6 +1657,11 @@ fn process_packets<D: Demuxer, M: Muxer>(
     if let (Some(decoder), Some(encoder)) = (audio_decoder.as_mut(), audio_encoder.as_mut()) {
         decoder.flush()?;
         while let Ok(frame) = decoder.receive_frame() {
+            let frame = if let Some(resampler) = audio_resampler {
+                resampler.resample(&frame)?
+            } else {
+                frame
+            };
             encoder.send_frame(&frame)?;
             while let Ok(mut enc_packet) = encoder.receive_packet() {
                 if let Some(out_idx) = audio_out_idx {
