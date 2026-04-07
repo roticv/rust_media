@@ -762,7 +762,7 @@ fn run_transform(
                 duration,
                 progress,
                 &mut ssim_filter,
-                &audio_resampler,
+                &mut audio_resampler,
             )?;
         }
         "webm" => {
@@ -779,7 +779,7 @@ fn run_transform(
                 duration,
                 progress,
                 &mut ssim_filter,
-                &audio_resampler,
+                &mut audio_resampler,
             )?;
         }
         "wav" => {
@@ -826,7 +826,7 @@ fn transcode_to_mp4(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
-    audio_resampler: &Option<AudioResampler>,
+    audio_resampler: &mut Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let mut writer = BufWriter::new(output_file);
@@ -929,7 +929,7 @@ fn transcode_to_webm(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
-    audio_resampler: &Option<AudioResampler>,
+    audio_resampler: &mut Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let writer = BufWriter::new(output_file);
@@ -1210,7 +1210,7 @@ fn run_transcode_pipeline<M: Muxer>(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
-    audio_resampler: &Option<AudioResampler>,
+    audio_resampler: &mut Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create decoders and encoders
     let mut video_decoder: Option<Box<dyn DecoderWrapper>> = None;
@@ -1388,7 +1388,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
     progress_state: &mut Option<ProgressState>,
     stream_time_bases: &[(u32, u32)],
     ssim_filter: &mut Option<SsimFilterContext>,
-    audio_resampler: &Option<AudioResampler>,
+    audio_resampler: &mut Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reorder buffer for video frames (B-frame decode order → PTS order)
     let mut reorder_buf = FrameReorderBuffer::new();

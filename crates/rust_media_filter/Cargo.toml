@@ -9,3 +9,4 @@ description = "Filter implementations for rust_media - audio resampling, SSIM, a
 
 [dependencies]
 rust_media_core = { workspace = true }
+rubato = "0.16"
