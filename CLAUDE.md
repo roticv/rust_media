@@ -42,11 +42,12 @@ x264 = { version = "...", optional = true }
 | VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
 | AV1 | dav1d/rav1e | BSD/MIT | *(default)* | Planned |
-| H.264 (decode) | OpenH264 | BSD-2-Clause | *(default)* | ✅ Implemented (Baseline only) |
+| H.264 (decode) | rust_h264 | MIT/Apache-2.0 | *(default)* | ✅ Implemented (Baseline, Main, High) |
 | H.264 (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (all profiles, macOS) |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
 | H.265/HEVC | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
+| MP3 (decode) | minimp3 | MIT | *(default)* | ✅ Implemented |
 | AAC | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
 | PCM | *(native)* | N/A | *(default)* | ✅ Implemented |
 
@@ -95,12 +96,13 @@ rust_media/
 │   │   └── MKV demuxer/muxer (planned)
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (OpenH264/VideoToolbox decode, x264 encode), AV1 (planned)
-│   │   └── Audio: PCM ✅, Opus ✅, AAC ✅ (fdk-aac)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), AV1 (planned)
+│   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), AAC ✅ (fdk-aac)
 │   │
-│   ├── rust_media_filter/  # Filter implementations (planned)
-│   │   ├── Video: scale, crop, overlay, rotate
-│   │   └── Audio: resample, mix, volume
+│   ├── rust_media_filter/  # Filter implementations
+│   │   ├── Video: SSIM ✅; scale, crop, overlay, rotate (planned)
+│   │   ├── Audio: resample ✅; mix, volume (planned)
+│   │   └── Filter graph parsing (FFmpeg-like syntax) ✅
 │   │
 │   ├── rust_media/         # Main library (re-exports)
 │   │   └── Convenience crate that re-exports all components
@@ -116,7 +118,7 @@ rust_media/
 - **rust_media_core**: Foundation - all other crates depend on this
 - **rust_media_format**: Implements Demuxer and Muxer traits for containers
 - **rust_media_codec**: Implements Decoder and Encoder traits for codecs
-- **rust_media_filter**: Implements Filter trait for frame processing (planned)
+- **rust_media_filter**: Filter graph parsing + filter implementations (resampling, SSIM, etc.)
 - **rust_media**: Main public API - users typically only need this
 - **rust_media_cli**: Binary executable for command-line usage
 
@@ -248,7 +250,7 @@ Build comprehensive testing infrastructure including:
   - Efficient: ~50% less overhead than FFmpeg output (363 bytes vs 711 bytes)
   - See `examples/webm_remux.rs` for usage
 - ✅ **MP4** (ISO Base Media File Format): Demuxer + Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
-  - Supports H.264/AVC (avc1), VP9 (vp09), AAC (mp4a), and Opus audio
+  - Supports H.264/AVC (avc1), VP9 (vp09), AAC (mp4a), MP3 (.mp3), and Opus audio
   - Muxer: Streaming API with incremental packet writing
   - Muxer: File structure: ftyp | mdat | moov (streaming-friendly)
   - Complete sample table support: stts, stsc, stsz, stco/co64, stss, ctts
@@ -264,14 +266,13 @@ Build comprehensive testing infrastructure including:
   - Encoder: Functional with limited configuration options (see limitations below)
   - See `crates/rust_media_codec/examples/test_vp8_codec.rs` for decode/encode roundtrip example
 - ✅ **H.264/AVC** (decoder + encoder) **IMPLEMENTED**
-  - **Decoder**: OpenH264 (BSD-2-Clause) in `rust_media_codec/src/video/openh264.rs`
-    - Uses openh264 crate (v0.6.x) - safe Rust bindings to OpenH264
-    - OpenH264 is bundled/compiled automatically via openh264-sys2
+  - **Decoder**: rust_h264 (MIT/Apache-2.0) in `rust_media_codec/src/video/h264.rs`
+    - Uses rust_h264 crate (v0.2.0) - pure Rust H.264 decoder
+    - Supports Baseline, Main, and High profiles
     - YUV420P (I420) output format
-    - BSD-2-Clause licensed - default, MIT-compatible
-    - **Limitation**: Only supports **Constrained Baseline Profile** up to Level 5.2
-    - Does NOT support Main Profile or High Profile (most commercial H.264 content)
-    - For broader profile support, consider FFmpeg's libavcodec or hardware decoders
+    - POC-based frame reordering for correct display order with B-frames
+    - Supports both AVCC format (MP4) and Annex B format (raw H.264)
+    - Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
   - **Encoder**: x264 (GPL v2+) in `rust_media_codec/src/video/x264.rs`
     - Requires `gpl-x264` feature flag
     - Uses x264 crate (v0.5.0) - safe Rust bindings to libx264
@@ -298,6 +299,11 @@ Build comprehensive testing infrastructure including:
 - ✅ **Opus**: Lossy codec for speech and music, optimized for low-latency transmission. **IMPLEMENTED** in `rust_media_codec/src/audio/opus.rs`
   - Requires: libopus (install via `brew install opus` on macOS, `apt-get install libopus-dev` on Linux)
   - Supports: 8, 12, 16, 24, 48 kHz sample rates, mono and stereo
+- ✅ **MP3**: MP3 decoding via minimp3. **IMPLEMENTED** in `rust_media_codec/src/audio/mp3.rs`
+  - Uses minimp3 crate (v0.6, MIT) - C library bindings
+  - Streaming decoder: accumulates packet data for proper frame boundary detection
+  - Supports variable bitrate (VBR) and constant bitrate (CBR)
+  - Decode only (no encoder)
 - ✅ **AAC**: AAC-LC encoding and decoding via libfdk-aac. **IMPLEMENTED** in `rust_media_codec/src/audio/fdk_aac.rs`
   - Requires: libfdk-aac (install via `brew install fdk-aac` on macOS, `apt-get install libfdk-aac-dev` on Linux)
   - Requires feature flag: `fdk-aac`
@@ -313,7 +319,6 @@ Build comprehensive testing infrastructure including:
 
 **Possible Future Codec Support** (depending on requirements):
 - **H.265/HEVC**: Modern successor to H.264, better compression but more complex
-- **MP3**: Legacy audio codec
 - **Vorbis**: Open audio codec (used in WebM)
 - **FLAC**: Lossless audio codec
 
@@ -323,20 +328,26 @@ Support for color conversions and bit-depth transformations:
 - YUV ↔ RGB conversions
 - Color space metadata handling
 
-#### 5. Filter Graph System 🚧 PLANNED
+#### 5. Filter Graph System 🚧 IN PROGRESS
 Build a flexible filtering system that:
 - Supports composable filter chains
 - Allows CLI-based filter graph construction
 - Handles video and audio processing
 - Enables common operations (scaling, cropping, mixing, etc.)
 
-**Status**: Planned for future development after core codec support is implemented.
+**Status**: Foundation implemented in `rust_media_filter` crate. FFmpeg-like filter graph parsing, audio resampling, and SSIM video quality metric are available. More filters planned.
 
-**Key Requirements**:
+**Implemented**:
+- **Filter graph parsing**: FFmpeg-like syntax (`filter_name=param1=value1:param2=value2`, comma-separated chains)
+- **aresample**: Audio resampling via linear interpolation (e.g., 44100 Hz → 48000 Hz)
+- **ssim**: SSIM quality comparison between two video streams
+- CLI integration via `--af` (audio filters) and `--vf` (video filters)
+
+**Key Requirements** (for future filters):
 - **Streaming API**: Filters must operate on frames incrementally (send/receive pattern)
 - **Graph construction**: Support both programmatic and CLI-based filter graph creation
 - **Zero-copy where possible**: Minimize frame copying in filter chains
-- **Common filters**: Scale, crop, overlay, rotate, format conversion, audio mixing, resampling
+- **Common filters**: Scale, crop, overlay, rotate, format conversion, audio mixing, volume
 
 #### 6. FFmpeg CLI Compatibility 🚧 PLANNED
 Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing migration and adoption.

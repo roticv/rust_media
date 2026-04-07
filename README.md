@@ -6,8 +6,9 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
-- **Container format** support (WAV ✅, WebM ✅, MP4 ✅ muxer, MKV planned)
-- **Codec** support (PCM ✅, Opus ✅, VP8 ✅, VP9 ✅, H.264 ✅, AAC ✅; AV1 planned)
+- **Container format** support (WAV ✅, WebM ✅, MP4 ✅ demuxer + muxer, MKV planned)
+- **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, AAC ✅; AV1 planned)
+- **Filter** support (audio resampling ✅, SSIM quality metric ✅)
 - **Modular architecture** with separate crates for different components
 
 ## Project Structure
@@ -17,6 +18,7 @@ This is a Cargo workspace with multiple crates:
 - **[rust_media_core](crates/rust_media_core)** - Core types (Packet, Frame) and traits (Demuxer, Decoder, Encoder, Muxer)
 - **[rust_media_format](crates/rust_media_format)** - Container format implementations
 - **[rust_media_codec](crates/rust_media_codec)** - Codec implementations
+- **[rust_media_filter](crates/rust_media_filter)** - Filter implementations (resampling, SSIM, etc.)
 - **[rust_media](crates/rust_media)** - Main library that re-exports all components
 - **[rust_media_cli](crates/rust_media_cli)** - Command-line tool
 
@@ -94,15 +96,18 @@ This project is in active development. Current status:
 ### Codecs
 - ✅ **PCM** codec (decoder + encoder)
 - ✅ **Opus** codec (decoder + encoder)
+- ✅ **MP3** decoder (via minimp3, MIT)
 - ✅ **VP8** codec (decoder + encoder via libvpx)
 - ✅ **VP9** codec (decoder + encoder via libvpx)
-- ✅ **H.264** decoder (via OpenH264, BSD-2-Clause) - *Constrained Baseline Profile only*
+- ✅ **H.264** decoder (via rust_h264, pure Rust, MIT/Apache-2.0) - *Baseline, Main, High profiles*
 - ✅ **H.264** decoder (via VideoToolbox, requires `videotoolbox` feature) - *All profiles, macOS only*
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
 - ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
 - 📋 AV1 codec - Planned
 
-**Note**: The default H.264 decoder uses OpenH264 which only supports Constrained Baseline Profile. For Main or High Profile content (common in commercial videos), enable the `videotoolbox` feature on macOS for hardware-accelerated decoding of all profiles.
+### Filters
+- ✅ **aresample** - Audio resampling (linear interpolation)
+- ✅ **ssim** - Video SSIM quality comparison
 
 ### CLI Tool
 - ✅ **info** - Analyze media files (similar to ffprobe)
@@ -115,11 +120,9 @@ This project is in active development. Current status:
   - Audio transcoding (Opus, AAC, PCM)
   - Stream copy (passthrough)
   - Bitrate control
-  - Video filters: SSIM quality comparison (two-input)
+  - Audio filters: resampling (`--af aresample=48000`)
+  - Video filters: SSIM quality comparison (`--vf ssim`)
   - See [rust_media_cli documentation](crates/rust_media_cli/README.md) for details
-
-### Other
-- 📋 Filter system (scale, crop, format conversion, etc.) - Planned
 
 ## Optional Features
 
