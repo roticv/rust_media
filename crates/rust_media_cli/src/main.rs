@@ -1725,45 +1725,82 @@ fn run_info(
         .unwrap_or("")
         .to_lowercase();
 
-    // Open the appropriate demuxer based on file extension
-    let (format_name, streams, container_duration, container_bitrate, packets, frames) =
-        match extension.as_str() {
-            "mp4" | "m4a" | "m4v" | "mov" => {
-                analyze_mp4(&filename, show_packets, show_frames, count, stream_filter)?
-            }
-            "webm" => analyze_webm(&filename, show_packets, show_frames, count, stream_filter)?,
-            "wav" => analyze_wav(&filename, show_packets, show_frames, count, stream_filter)?,
-            _ => {
-                return Err(format!(
-                    "Unsupported format: {}. Supported: mp4, m4a, m4v, mov, webm, wav",
-                    extension
-                )
-                .into())
-            }
-        };
-
-    // Build media info structure
-    let media_info = MediaInfo {
-        format: FormatInfo {
-            filename: filename.clone(),
-            format_name,
-            duration_us: container_duration,
-            duration: container_duration.map(format_duration),
-            bitrate: container_bitrate,
-            nb_streams: streams.len(),
-        },
-        streams,
-        packets,
-        frames,
+    // Open the appropriate demuxer
+    let mut demuxer: Box<dyn Demuxer> = match extension.as_str() {
+        "mp4" | "m4a" | "m4v" | "mov" => {
+            let file = File::open(&filename)?;
+            Box::new(Mp4Demuxer::new(BufReader::new(file))?)
+        }
+        "webm" => {
+            let file = File::open(&filename)?;
+            Box::new(WebmDemuxer::open(BufReader::new(file))?)
+        }
+        "wav" => {
+            let file = File::open(&filename)?;
+            Box::new(WavDemuxer::open(BufReader::new(file))?)
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported format: {}. Supported: mp4, m4a, m4v, mov, webm, wav",
+                extension
+            )
+            .into())
+        }
     };
 
-    // Output based on format
+    let container = demuxer.container_info()?;
+    let raw_streams = demuxer.streams()?;
+    let streams_json: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
+    let time_bases: Vec<(u32, u32)> = raw_streams.iter().map(|s| s.time_base).collect();
+
     match output_format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&media_info)?);
-        }
         OutputFormat::Text => {
-            print_text_output(&media_info);
+            // Print header immediately
+            print_text_header(&filename, &container.format_name, container.duration, container.bitrate, &streams_json);
+
+            // Stream packets/frames as they are decoded
+            if show_packets || show_frames {
+                stream_packets_and_frames_text(
+                    &mut *demuxer,
+                    &raw_streams,
+                    &time_bases,
+                    show_packets,
+                    show_frames,
+                    count,
+                    stream_filter,
+                )?;
+            }
+        }
+        OutputFormat::Json => {
+            // JSON needs the complete structure, so buffer everything
+            let (packets, frames) = if show_packets || show_frames {
+                collect_packets_and_frames(
+                    &mut *demuxer,
+                    &raw_streams,
+                    &time_bases,
+                    show_packets,
+                    show_frames,
+                    count,
+                    stream_filter,
+                )?
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+            let media_info = MediaInfo {
+                format: FormatInfo {
+                    filename: filename.clone(),
+                    format_name: container.format_name,
+                    duration_us: container.duration,
+                    duration: container.duration.map(format_duration),
+                    bitrate: container.bitrate,
+                    nb_streams: streams_json.len(),
+                },
+                streams: streams_json,
+                packets,
+                frames,
+            };
+            println!("{}", serde_json::to_string_pretty(&media_info)?);
         }
     }
 
@@ -1771,153 +1808,11 @@ fn run_info(
 }
 
 // ============================================================================
-/// Return type for format-specific analyzers.
-type AnalyzeResult = Result<
-    (String, Vec<StreamInfoJson>, Option<i64>, Option<u64>, Vec<PacketInfo>, Vec<FrameInfo>),
-    Box<dyn std::error::Error>,
->;
-
-// Format-specific analyzers
+// Packet and frame collection (used by JSON output mode)
 // ============================================================================
 
-fn analyze_mp4(
-    filename: &str,
-    show_packets: bool,
-    show_frames: bool,
-    count: usize,
-    stream_filter: Option<usize>,
-) -> AnalyzeResult {
-    let file = File::open(filename)?;
-    let reader = BufReader::new(file);
-    let mut demuxer = Mp4Demuxer::new(reader)?;
-
-    let container = demuxer.container_info()?;
-    let raw_streams = demuxer.streams()?;
-
-    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
-
-    let mut packets = Vec::new();
-    let mut frames = Vec::new();
-
-    if show_packets || show_frames {
-        let time_bases: Vec<(u32, u32)> = raw_streams.iter().map(|s| s.time_base).collect();
-        let (p, f) = collect_packets_and_frames(
-            &mut demuxer,
-            &raw_streams,
-            &time_bases,
-            show_packets,
-            show_frames,
-            count,
-            stream_filter,
-        )?;
-        packets = p;
-        frames = f;
-    }
-
-    Ok((
-        container.format_name,
-        streams,
-        container.duration,
-        container.bitrate,
-        packets,
-        frames,
-    ))
-}
-
-fn analyze_webm(
-    filename: &str,
-    show_packets: bool,
-    show_frames: bool,
-    count: usize,
-    stream_filter: Option<usize>,
-) -> AnalyzeResult {
-    let file = File::open(filename)?;
-    let reader = BufReader::new(file);
-    let mut demuxer = WebmDemuxer::open(reader)?;
-
-    let container = demuxer.container_info()?;
-    let raw_streams = demuxer.streams()?;
-
-    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
-
-    let mut packets = Vec::new();
-    let mut frames = Vec::new();
-
-    if show_packets || show_frames {
-        let time_bases: Vec<(u32, u32)> = raw_streams.iter().map(|s| s.time_base).collect();
-        let (p, f) = collect_packets_and_frames(
-            &mut demuxer,
-            &raw_streams,
-            &time_bases,
-            show_packets,
-            show_frames,
-            count,
-            stream_filter,
-        )?;
-        packets = p;
-        frames = f;
-    }
-
-    Ok((
-        container.format_name,
-        streams,
-        container.duration,
-        container.bitrate,
-        packets,
-        frames,
-    ))
-}
-
-fn analyze_wav(
-    filename: &str,
-    show_packets: bool,
-    show_frames: bool,
-    count: usize,
-    stream_filter: Option<usize>,
-) -> AnalyzeResult {
-    let file = File::open(filename)?;
-    let reader = BufReader::new(file);
-    let mut demuxer = WavDemuxer::open(reader)?;
-
-    let container = demuxer.container_info()?;
-    let raw_streams = demuxer.streams()?;
-
-    let streams: Vec<StreamInfoJson> = raw_streams.iter().map(stream_to_json).collect();
-
-    let mut packets = Vec::new();
-    let mut frames = Vec::new();
-
-    if show_packets || show_frames {
-        let time_bases: Vec<(u32, u32)> = raw_streams.iter().map(|s| s.time_base).collect();
-        let (p, f) = collect_packets_and_frames(
-            &mut demuxer,
-            &raw_streams,
-            &time_bases,
-            show_packets,
-            show_frames,
-            count,
-            stream_filter,
-        )?;
-        packets = p;
-        frames = f;
-    }
-
-    Ok((
-        container.format_name,
-        streams,
-        container.duration,
-        container.bitrate,
-        packets,
-        frames,
-    ))
-}
-
-// ============================================================================
-// Packet and frame collection
-// ============================================================================
-
-fn collect_packets_and_frames<D: Demuxer>(
-    demuxer: &mut D,
+fn collect_packets_and_frames(
+    demuxer: &mut dyn Demuxer,
     streams: &[StreamInfo],
     time_bases: &[(u32, u32)],
     show_packets: bool,
@@ -2135,22 +2030,27 @@ fn format_duration(microseconds: i64) -> String {
 // Text output formatting
 // ============================================================================
 
-fn print_text_output(info: &MediaInfo) {
-    // Format section
-    println!("Input: {}", info.format.filename);
-    println!("  Format:     {}", info.format.format_name);
-    if let Some(dur) = &info.format.duration {
-        println!("  Duration:   {}", dur);
+/// Print the header section (format info + streams) for text output mode.
+fn print_text_header(
+    filename: &str,
+    format_name: &str,
+    duration: Option<i64>,
+    bitrate: Option<u64>,
+    streams: &[StreamInfoJson],
+) {
+    println!("Input: {}", filename);
+    println!("  Format:     {}", format_name);
+    if let Some(dur) = duration {
+        println!("  Duration:   {}", format_duration(dur));
     }
-    if let Some(br) = info.format.bitrate {
+    if let Some(br) = bitrate {
         println!("  Bitrate:    {} kb/s", br / 1000);
     }
-    println!("  Streams:    {}", info.format.nb_streams);
+    println!("  Streams:    {}", streams.len());
     println!();
 
-    // Streams section
     println!("Streams:");
-    for stream in &info.streams {
+    for stream in streams {
         print!(
             "  Stream #{}: {} ({})",
             stream.index, stream.media_type, stream.codec
@@ -2188,66 +2088,198 @@ fn print_text_output(info: &MediaInfo) {
 
         println!();
     }
+}
 
-    // Packets section
-    if !info.packets.is_empty() {
+/// Print a single packet line in text format.
+fn print_text_packet(pkt: &PacketInfo) {
+    println!(
+        "{:>6} {:>6} {:>8} {:>12} {:>12} {:>12} {:>8} {:>4}",
+        pkt.packet_index,
+        pkt.stream_index,
+        pkt.media_type,
+        pkt.pts.map(|p| p.to_string()).unwrap_or("-".to_string()),
+        pkt.pts_time.as_deref().unwrap_or("-"),
+        pkt.dts.map(|d| d.to_string()).unwrap_or("-".to_string()),
+        pkt.size,
+        if pkt.is_keyframe { "K" } else { "" }
+    );
+}
+
+/// Print a single frame line in text format.
+fn print_text_frame(frm: &FrameInfo) {
+    let info_str = match &frm.params {
+        FrameParamsJson::Video {
+            width,
+            height,
+            pixel_format,
+        } => format!("{}x{} {}", width, height, pixel_format),
+        FrameParamsJson::Audio {
+            nb_samples,
+            channels,
+            ..
+        } => format!("{} samples, {} ch", nb_samples, channels),
+        FrameParamsJson::Unknown {} => "-".to_string(),
+    };
+
+    println!(
+        "{:>6} {:>6} {:>8} {:>12} {:>12} {:>6} {:>20}",
+        frm.frame_index,
+        frm.stream_index,
+        frm.media_type,
+        frm.pts.map(|p| p.to_string()).unwrap_or("-".to_string()),
+        frm.pts_time.as_deref().unwrap_or("-"),
+        frm.pict_type.as_deref().unwrap_or("-"),
+        info_str
+    );
+}
+
+/// Stream packets/frames to stdout in text mode — prints each line immediately.
+fn stream_packets_and_frames_text(
+    demuxer: &mut dyn Demuxer,
+    streams: &[StreamInfo],
+    time_bases: &[(u32, u32)],
+    show_packets: bool,
+    show_frames: bool,
+    count: usize,
+    stream_filter: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut packet_index = 0;
+    let mut frame_index = 0;
+    let mut output_count = 0;
+
+    // Print column headers
+    if show_packets {
         println!();
         println!("Packets:");
         println!(
             "{:>6} {:>6} {:>8} {:>12} {:>12} {:>12} {:>8} {:>4}",
             "PKT", "STREAM", "TYPE", "PTS", "PTS_TIME", "DTS", "SIZE", "KEY"
         );
-        for pkt in &info.packets {
-            println!(
-                "{:>6} {:>6} {:>8} {:>12} {:>12} {:>12} {:>8} {:>4}",
-                pkt.packet_index,
-                pkt.stream_index,
-                pkt.media_type,
-                pkt.pts.map(|p| p.to_string()).unwrap_or("-".to_string()),
-                pkt.pts_time.as_deref().unwrap_or("-"),
-                pkt.dts.map(|d| d.to_string()).unwrap_or("-".to_string()),
-                pkt.size,
-                if pkt.is_keyframe { "K" } else { "" }
-            );
-        }
     }
-
-    // Frames section
-    if !info.frames.is_empty() {
+    if show_frames {
         println!();
         println!("Frames:");
         println!(
             "{:>6} {:>6} {:>8} {:>12} {:>12} {:>6} {:>20}",
             "FRAME", "STREAM", "TYPE", "PTS", "PTS_TIME", "PICT", "INFO"
         );
-        for frm in &info.frames {
-            let info_str = match &frm.params {
-                FrameParamsJson::Video {
-                    width,
-                    height,
-                    pixel_format,
-                } => format!("{}x{} {}", width, height, pixel_format),
-                FrameParamsJson::Audio {
-                    nb_samples,
-                    channels,
-                    ..
-                } => format!("{} samples, {} ch", nb_samples, channels),
-                FrameParamsJson::Unknown {} => "-".to_string(),
-            };
+    }
 
-            println!(
-                "{:>6} {:>6} {:>8} {:>12} {:>12} {:>6} {:>20}",
-                frm.frame_index,
-                frm.stream_index,
-                frm.media_type,
-                frm.pts.map(|p| p.to_string()).unwrap_or("-".to_string()),
-                frm.pts_time.as_deref().unwrap_or("-"),
-                frm.pict_type.as_deref().unwrap_or("-"),
-                info_str
-            );
+    let mut decoders: Vec<Option<Box<dyn DecoderWrapper>>> = if show_frames {
+        streams.iter().map(|s| create_decoder(s)).collect()
+    } else {
+        vec![]
+    };
+
+    loop {
+        match demuxer.read_packet() {
+            Ok(packet) => {
+                let stream_idx = packet.stream_index();
+
+                if let Some(filter) = stream_filter {
+                    if stream_idx != filter {
+                        continue;
+                    }
+                }
+
+                let time_base = time_bases.get(stream_idx).copied().unwrap_or((1, 1000000));
+
+                if show_packets {
+                    let pkt_info = PacketInfo {
+                        packet_index,
+                        stream_index: stream_idx,
+                        media_type: format!("{:?}", packet.media_type()).to_lowercase(),
+                        pts: packet.pts(),
+                        pts_time: packet.pts().map(|p| format_time(p, time_base)),
+                        dts: packet.dts(),
+                        dts_time: packet.dts().map(|d| format_time(d, time_base)),
+                        duration: packet.duration(),
+                        size: packet.size(),
+                        is_keyframe: packet.is_keyframe(),
+                    };
+                    print_text_packet(&pkt_info);
+                    if !show_frames {
+                        output_count += 1;
+                    }
+                }
+
+                if show_frames {
+                    if let Some(Some(decoder)) = decoders.get_mut(stream_idx) {
+                        if decoder.send_packet(&packet).is_ok() {
+                            while let Ok(frame) = decoder.receive_frame() {
+                                let frame_info = FrameInfo {
+                                    frame_index,
+                                    stream_index: stream_idx,
+                                    media_type: format!("{:?}", frame.media_type()).to_lowercase(),
+                                    pts: frame.pts(),
+                                    pts_time: frame.pts().map(|p| format_time(p, time_base)),
+                                    is_keyframe: frame.is_keyframe(),
+                                    pict_type: Some(if frame.is_keyframe() {
+                                        "I".to_string()
+                                    } else {
+                                        "P".to_string()
+                                    }),
+                                    params: frame_to_params_json(&frame),
+                                };
+                                print_text_frame(&frame_info);
+                                frame_index += 1;
+                                output_count += 1;
+
+                                if count > 0 && output_count >= count {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                packet_index += 1;
+
+                if count > 0 && output_count >= count {
+                    break;
+                }
+            }
+            Err(rust_media::Error::EndOfStream) => break,
+            Err(_) => break,
         }
     }
+
+    // Flush decoders
+    if show_frames {
+        for (stream_idx, decoder_opt) in decoders.iter_mut().enumerate() {
+            if let Some(decoder) = decoder_opt {
+                let _ = decoder.flush();
+                let time_base = time_bases.get(stream_idx).copied().unwrap_or((1, 1000000));
+                while let Ok(frame) = decoder.receive_frame() {
+                    let frame_info = FrameInfo {
+                        frame_index,
+                        stream_index: stream_idx,
+                        media_type: format!("{:?}", frame.media_type()).to_lowercase(),
+                        pts: frame.pts(),
+                        pts_time: frame.pts().map(|p| format_time(p, time_base)),
+                        is_keyframe: frame.is_keyframe(),
+                        pict_type: Some(if frame.is_keyframe() {
+                            "I".to_string()
+                        } else {
+                            "P".to_string()
+                        }),
+                        params: frame_to_params_json(&frame),
+                    };
+                    print_text_frame(&frame_info);
+                    frame_index += 1;
+                    output_count += 1;
+
+                    if count > 0 && output_count >= count {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
+
 
 // ============================================================================
 // SSIM helper functions (CLI-specific: demuxer opening, stream finding)
