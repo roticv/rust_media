@@ -746,6 +746,26 @@ fn run_transform(
         }
     }
 
+    // Auto-resample if the encoder doesn't support the input sample rate
+    if audio_resampler.is_none() && audio_codec != "copy" && audio_codec != "none" {
+        if let Some(ref mut aus) = audio_stream {
+            if let StreamParams::Audio(ref ap) = aus.params {
+                if let Some(target_rate) = nearest_supported_sample_rate(audio_codec, ap.sample_rate) {
+                    eprintln!(
+                        "Auto-resampling audio: {} Hz -> {} Hz (required by {} encoder)",
+                        ap.sample_rate, target_rate, audio_codec
+                    );
+                    audio_resampler = Some(AudioResampler::new(target_rate));
+                    // Update stream info so muxer and encoder get the resampled rate
+                    if let StreamParams::Audio(ref mut ap) = aus.params {
+                        ap.sample_rate = target_rate;
+                    }
+                    aus.time_base = (1, target_rate);
+                }
+            }
+        }
+    }
+
     // Perform the actual transcoding
     match output_ext.as_str() {
         "mp4" | "m4a" | "m4v" | "mov" => {
@@ -1796,6 +1816,30 @@ fn create_video_encoder(
         }
         _ => Err(format!("No encoder available for video codec: {}", codec).into()),
     }
+}
+
+/// Returns the nearest supported sample rate for the given encoder codec,
+/// or None if the rate is already supported.
+fn nearest_supported_sample_rate(codec: &str, input_rate: u32) -> Option<u32> {
+    let supported: &[u32] = match codec {
+        "opus" => &[8000, 12000, 16000, 24000, 48000],
+        "pcm" => return None, // PCM supports any rate
+        #[cfg(feature = "fdk-aac")]
+        "aac" => return None, // fdk-aac supports a wide range
+        _ => return None,
+    };
+
+    if supported.contains(&input_rate) {
+        return None; // already supported
+    }
+
+    // Find the nearest supported rate
+    Some(
+        *supported
+            .iter()
+            .min_by_key(|&&r| (r as i64 - input_rate as i64).unsigned_abs())
+            .unwrap(),
+    )
 }
 
 fn create_audio_encoder(
