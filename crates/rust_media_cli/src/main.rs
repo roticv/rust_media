@@ -1143,7 +1143,7 @@ fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
                     let pts_us = packet.pts().map(|p| {
                         if time_base.1 > 0 { p * time_base.0 as i64 * 1_000_000 / time_base.1 as i64 } else { p }
                     });
-                    ps.update(pts_us, packet.size());
+                    ps.update(pts_us);
                 }
 
                 decoder.send_packet(&packet)?;
@@ -1353,7 +1353,7 @@ fn run_transcode_pipeline<M: Muxer>(
         _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
     }
 
-    if let Some(ps) = &progress_state {
+    if let Some(ps) = &mut progress_state {
         ps.finish();
     }
 
@@ -1392,16 +1392,20 @@ fn process_packets<D: Demuxer, M: Muxer>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reorder buffer for video frames (B-frame decode order → PTS order)
     let mut reorder_buf = FrameReorderBuffer::new();
+    let mut output_bytes: u64 = 0;
 
     /// Helper: encode a frame and write resulting packets to the muxer.
+    /// Accumulates output bytes written into `output_bytes`.
     fn encode_and_mux<M: Muxer>(
         encoder: &mut Box<dyn EncoderWrapper>,
         muxer: &mut M,
         frame: &Frame,
         out_idx: usize,
+        output_bytes: &mut u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         encoder.send_frame(frame)?;
         while let Ok(mut enc_packet) = encoder.receive_packet() {
+            *output_bytes += enc_packet.size() as u64;
             enc_packet.set_stream_index(out_idx);
             muxer.write_packet(&enc_packet)?;
         }
@@ -1417,11 +1421,12 @@ fn process_packets<D: Demuxer, M: Muxer>(
 
                 // Update progress (convert PTS to microseconds using stream timebase)
                 if let Some(ps) = progress_state.as_mut() {
+                    ps.total_size = output_bytes;
                     let pts_us = packet.pts().map(|p| {
                         let tb = stream_time_bases.get(stream_idx).copied().unwrap_or((1, 1_000_000));
                         if tb.1 > 0 { p * tb.0 as i64 * 1_000_000 / tb.1 as i64 } else { p }
                     });
-                    ps.update(pts_us, packet.size());
+                    ps.update(pts_us);
                 }
 
                 // Handle video packet
@@ -1430,6 +1435,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
                         if video_codec == "copy" {
                             // Passthrough
                             let mut out_packet = packet.clone();
+                            output_bytes += out_packet.size() as u64;
                             out_packet.set_stream_index(out_idx);
                             muxer.write_packet(&out_packet)?;
                         } else if let (Some(decoder), Some(encoder)) =
@@ -1451,7 +1457,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
                                 // Push into reorder buffer; encode frames that are ready
                                 reorder_buf.push(frame);
                                 while let Some(ordered_frame) = reorder_buf.pop_ready() {
-                                    encode_and_mux(encoder, muxer, &ordered_frame, out_idx)?;
+                                    encode_and_mux(encoder, muxer, &ordered_frame, out_idx, &mut output_bytes)?;
                                 }
                             }
                         }
@@ -1464,6 +1470,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
                         if audio_codec == "copy" {
                             // Passthrough
                             let mut out_packet = packet.clone();
+                            output_bytes += out_packet.size() as u64;
                             out_packet.set_stream_index(out_idx);
                             muxer.write_packet(&out_packet)?;
                         } else if let (Some(decoder), Some(encoder)) =
@@ -1480,6 +1487,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
                                 };
                                 encoder.send_frame(&frame)?;
                                 while let Ok(mut enc_packet) = encoder.receive_packet() {
+                                    output_bytes += enc_packet.size() as u64;
                                     enc_packet.set_stream_index(out_idx);
                                     muxer.write_packet(&enc_packet)?;
                                 }
@@ -1507,7 +1515,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
             reorder_buf.push(frame);
             while let Some(ordered_frame) = reorder_buf.pop_ready() {
                 if let Some(out_idx) = video_out_idx {
-                    encode_and_mux(encoder, muxer, &ordered_frame, out_idx)?;
+                    encode_and_mux(encoder, muxer, &ordered_frame, out_idx, &mut output_bytes)?;
                 }
             }
         }
@@ -1515,7 +1523,7 @@ fn process_packets<D: Demuxer, M: Muxer>(
         // Drain all remaining frames from reorder buffer
         while let Some(ordered_frame) = reorder_buf.flush_next() {
             if let Some(out_idx) = video_out_idx {
-                encode_and_mux(encoder, muxer, &ordered_frame, out_idx)?;
+                encode_and_mux(encoder, muxer, &ordered_frame, out_idx, &mut output_bytes)?;
             }
         }
 
@@ -1578,12 +1586,9 @@ impl ProgressState {
         }
     }
 
-    /// Update progress with a processed packet. Prints at most every 500ms.
+    /// Update progress timestamp. Prints at most every 500ms.
     /// `pts_us` should be pre-converted to microseconds by the caller.
-    /// `pts` should already be converted to microseconds by the caller,
-    /// or use `update_with_timebase` for raw PTS values.
-    fn update(&mut self, pts_us: Option<i64>, packet_size: usize) {
-        self.total_size += packet_size as u64;
+    fn update(&mut self, pts_us: Option<i64>) {
         if let Some(us) = pts_us {
             // Only update if this is a larger timestamp (avoids audio/video interleaving jitter)
             if self.last_pts_us.is_none_or(|prev| us > prev) {
