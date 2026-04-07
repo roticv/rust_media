@@ -178,6 +178,7 @@ pub fn parse_stsd<R: Read + Seek>(reader: &mut R, size: u64) -> Result<Vec<Sampl
             AVC1 => parse_avc1_entry(reader, &entry_header)?,
             VP09 => parse_vp09_entry(reader, &entry_header)?,
             OPUS => parse_opus_entry(reader, &entry_header)?,
+            DOT_MP3 => parse_mp3_entry(reader, &entry_header)?,
             _ => SampleEntry::Unknown,
         };
 
@@ -288,6 +289,34 @@ fn parse_esds<R: Read>(reader: &mut R, size: usize) -> Result<Vec<u8>> {
     }
 
     Ok(Vec::new())
+}
+
+/// Parses .mp3 (MP3) sample entry
+fn parse_mp3_entry<R: Read + Seek>(reader: &mut R, _header: &BoxHeader) -> Result<SampleEntry> {
+    // Skip reserved (6 bytes) + data reference index (2 bytes)
+    reader.seek(SeekFrom::Current(8))?;
+
+    // Audio-specific fields (same layout as mp4a)
+    let _version = reader.read_u16::<BigEndian>()?;
+    let _revision = reader.read_u16::<BigEndian>()?;
+    let _vendor = reader.read_u32::<BigEndian>()?;
+
+    let channels = reader.read_u16::<BigEndian>()?;
+    let sample_size = reader.read_u16::<BigEndian>()?;
+    let _compression_id = reader.read_u16::<BigEndian>()?;
+    let _packet_size = reader.read_u16::<BigEndian>()?;
+
+    // Sample rate is 16.16 fixed point
+    let sample_rate_fixed = reader.read_u32::<BigEndian>()?;
+    let sample_rate = sample_rate_fixed >> 16;
+
+    Ok(SampleEntry::Audio(AudioSampleEntry {
+        codec: "mp3".to_string(),
+        channels,
+        sample_size,
+        sample_rate,
+        extra_data: Vec::new(),
+    }))
 }
 
 /// Parses avc1 (H.264) sample entry

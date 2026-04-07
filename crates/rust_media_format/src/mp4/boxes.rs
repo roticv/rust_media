@@ -94,6 +94,8 @@ pub const ESDS: u32 = fourcc(b"esds");
 pub const OPUS: u32 = fourcc(b"Opus");
 /// Opus specific box
 pub const DOPS: u32 = fourcc(b"dOps");
+/// MP3 audio sample entry
+pub const DOT_MP3: u32 = fourcc(b".mp3");
 
 // Handler types
 /// Video handler type
