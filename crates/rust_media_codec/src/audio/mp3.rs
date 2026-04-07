@@ -17,11 +17,19 @@ use std::io::Cursor;
 /// MP3 Audio Decoder
 ///
 /// Decodes MP3 audio packets into PCM frames using minimp3.
-/// Each packet is expected to contain one or more complete MP3 frames.
+///
+/// Uses a streaming approach: packet data is accumulated in a buffer, and
+/// minimp3 decodes from the concatenated stream. This is necessary because
+/// minimp3 needs to see ahead to the next frame's sync word to validate
+/// the current frame.
 pub struct Mp3Decoder {
     stream_info: StreamInfo,
     flushed: bool,
     buffered_frames: Vec<Frame>,
+    /// Accumulated MP3 data from packets
+    data_buf: Vec<u8>,
+    /// PTS values corresponding to each packet appended
+    pts_queue: Vec<Option<i64>>,
 }
 
 impl Mp3Decoder {
@@ -38,7 +46,73 @@ impl Mp3Decoder {
             stream_info,
             flushed: false,
             buffered_frames: Vec::new(),
+            data_buf: Vec::new(),
+            pts_queue: Vec::new(),
         })
+    }
+
+    /// Decode as many complete frames as possible from the accumulated buffer.
+    fn decode_available(&mut self) {
+        if self.data_buf.is_empty() {
+            return;
+        }
+
+        let mut decoder = MiniMp3Decoder::new(Cursor::new(&self.data_buf));
+        let mut consumed = 0usize;
+
+        loop {
+            match decoder.next_frame() {
+                Ok(mp3_frame) => {
+                    consumed = decoder.reader().position() as usize;
+
+                    let channels = mp3_frame.channels;
+                    let sample_rate = mp3_frame.sample_rate as u32;
+                    let samples_per_channel = mp3_frame.data.len() / channels;
+
+                    let mut frame = Frame::new_audio(
+                        sample_rate,
+                        channels,
+                        SampleFormat::S16,
+                        samples_per_channel,
+                    );
+
+                    // Copy interleaved i16 samples to frame data
+                    if let Some(frame_data) = frame.plane_mut(0) {
+                        for (i, &sample) in mp3_frame.data.iter().enumerate() {
+                            let bytes = sample.to_le_bytes();
+                            frame_data[i * 2] = bytes[0];
+                            frame_data[i * 2 + 1] = bytes[1];
+                        }
+                    }
+
+                    // Assign PTS from queue
+                    if let Some(pts) = self.pts_queue.first().copied() {
+                        frame.set_pts(pts);
+                        self.pts_queue.remove(0);
+                    }
+
+                    let duration =
+                        (samples_per_channel as u64 * 1_000_000) / sample_rate as u64;
+                    frame = frame.with_duration(duration as i64);
+
+                    self.buffered_frames.push(frame);
+                }
+                Err(Mp3Error::SkippedData) => {
+                    consumed = decoder.reader().position() as usize;
+                    continue;
+                }
+                Err(Mp3Error::Eof) | Err(Mp3Error::InsufficientData) => {
+                    // Not enough data for another frame — keep remainder for next packet
+                    break;
+                }
+                Err(Mp3Error::Io(_)) => break,
+            }
+        }
+
+        // Remove consumed data from the buffer
+        if consumed > 0 {
+            self.data_buf.drain(..consumed);
+        }
     }
 }
 
@@ -70,52 +144,9 @@ impl Decoder for Mp3Decoder {
             return Ok(());
         }
 
-        let mut decoder = MiniMp3Decoder::new(Cursor::new(data));
-        let pts = packet.pts();
-
-        loop {
-            match decoder.next_frame() {
-                Ok(mp3_frame) => {
-                    let channels = mp3_frame.channels;
-                    let sample_rate = mp3_frame.sample_rate as u32;
-                    let samples_per_channel = mp3_frame.data.len() / channels;
-
-                    let mut frame = Frame::new_audio(
-                        sample_rate,
-                        channels,
-                        SampleFormat::S16,
-                        samples_per_channel,
-                    );
-
-                    // Copy interleaved i16 samples to frame data
-                    let frame_data = frame.plane_mut(0).ok_or_else(|| {
-                        Error::InvalidState("Frame missing data plane".to_string())
-                    })?;
-
-                    for (i, &sample) in mp3_frame.data.iter().enumerate() {
-                        let bytes = sample.to_le_bytes();
-                        frame_data[i * 2] = bytes[0];
-                        frame_data[i * 2 + 1] = bytes[1];
-                    }
-
-                    if let Some(p) = pts {
-                        frame.set_pts(Some(p));
-                    }
-
-                    let duration =
-                        (samples_per_channel as u64 * 1_000_000) / sample_rate as u64;
-                    frame = frame.with_duration(duration as i64);
-
-                    self.buffered_frames.push(frame);
-                }
-                Err(Mp3Error::Eof) => break,
-                Err(Mp3Error::InsufficientData) => break,
-                Err(Mp3Error::SkippedData) => continue,
-                Err(Mp3Error::Io(e)) => {
-                    return Err(Error::Decode(format!("MP3 IO error: {}", e)));
-                }
-            }
-        }
+        self.data_buf.extend_from_slice(data);
+        self.pts_queue.push(packet.pts());
+        self.decode_available();
 
         Ok(())
     }
@@ -131,6 +162,11 @@ impl Decoder for Mp3Decoder {
     }
 
     fn flush(&mut self) -> Result<()> {
+        // Pad buffer to let minimp3 decode the last frame
+        if !self.data_buf.is_empty() {
+            self.data_buf.extend_from_slice(&[0u8; 1536]);
+            self.decode_available();
+        }
         self.flushed = true;
         Ok(())
     }
@@ -138,6 +174,8 @@ impl Decoder for Mp3Decoder {
     fn reset(&mut self) -> Result<()> {
         self.flushed = false;
         self.buffered_frames.clear();
+        self.data_buf.clear();
+        self.pts_queue.clear();
         Ok(())
     }
 
