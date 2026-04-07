@@ -1073,6 +1073,7 @@ fn transcode_to_wav(
                 audio_stream.index,
                 duration,
                 progress,
+                audio_stream.time_base,
             )?;
         }
         "webm" => {
@@ -1086,6 +1087,7 @@ fn transcode_to_wav(
                 audio_stream.index,
                 duration,
                 progress,
+                audio_stream.time_base,
             )?;
         }
         "wav" => {
@@ -1099,6 +1101,7 @@ fn transcode_to_wav(
                 audio_stream.index,
                 duration,
                 progress,
+                audio_stream.time_base,
             )?;
         }
         _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
@@ -1114,12 +1117,18 @@ fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
     decoder: &mut Box<dyn DecoderWrapper>,
     muxer: &mut WavMuxer<W>,
     audio_stream_idx: usize,
-    duration: Option<i64>,
+    _duration: Option<i64>,
     progress: bool,
+    time_base: (u32, u32),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut packet_count = 0;
     let mut frame_count = 0;
     let start_time = std::time::Instant::now();
+    let mut progress_state = if progress {
+        Some(ProgressState::new())
+    } else {
+        None
+    };
 
     loop {
         match demuxer.read_packet() {
@@ -1129,6 +1138,13 @@ fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
                 }
 
                 packet_count += 1;
+
+                if let Some(ps) = progress_state.as_mut() {
+                    let pts_us = packet.pts().map(|p| {
+                        if time_base.1 > 0 { p * time_base.0 as i64 * 1_000_000 / time_base.1 as i64 } else { p }
+                    });
+                    ps.update(pts_us, packet.size());
+                }
 
                 decoder.send_packet(&packet)?;
 
@@ -1141,10 +1157,6 @@ fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
                             .with_pts(frame.pts().unwrap_or(0))
                             .with_duration(frame.duration().unwrap_or(0));
                         muxer.write_packet(&pcm_packet)?;
-                    }
-
-                    if progress && frame_count % 100 == 0 {
-                        print_progress(frame.pts(), duration, start_time);
                     }
                 }
             }
@@ -1164,11 +1176,11 @@ fn process_audio_to_wav<D: Demuxer, W: std::io::Write + std::io::Seek>(
         }
     }
 
-    if progress {
-        println!();
+    if let Some(ps) = &progress_state {
+        ps.finish();
     }
 
-    println!(
+    eprintln!(
         "Processed {} packets, {} frames in {:.2}s",
         packet_count,
         frame_count,
@@ -1225,9 +1237,32 @@ fn run_transcode_pipeline<M: Muxer>(
         }
     }
 
+    // Build stream timebase lookup (index → timebase)
+    let max_stream_idx = [video_in_idx, audio_in_idx]
+        .iter()
+        .filter_map(|x| *x)
+        .max()
+        .unwrap_or(0);
+    let mut stream_time_bases = vec![(1u32, 1_000_000u32); max_stream_idx + 1];
+    if let Some(ref vs) = video_stream {
+        if vs.index < stream_time_bases.len() {
+            stream_time_bases[vs.index] = vs.time_base;
+        }
+    }
+    if let Some(ref aus) = audio_stream {
+        if aus.index < stream_time_bases.len() {
+            stream_time_bases[aus.index] = aus.time_base;
+        }
+    }
+
     let start_time = std::time::Instant::now();
     let mut packet_count = 0;
     let mut frame_count = 0;
+    let mut progress_state = if progress {
+        Some(ProgressState::new())
+    } else {
+        None
+    };
 
     // Open input demuxer and process
     match input_ext {
@@ -1253,7 +1288,8 @@ fn run_transcode_pipeline<M: Muxer>(
                 progress,
                 &mut packet_count,
                 &mut frame_count,
-                start_time,
+                &mut progress_state,
+                &stream_time_bases,
                 ssim_filter,
                 audio_resampler,
             )?;
@@ -1280,7 +1316,8 @@ fn run_transcode_pipeline<M: Muxer>(
                 progress,
                 &mut packet_count,
                 &mut frame_count,
-                start_time,
+                &mut progress_state,
+                &stream_time_bases,
                 ssim_filter,
                 audio_resampler,
             )?;
@@ -1307,7 +1344,8 @@ fn run_transcode_pipeline<M: Muxer>(
                 progress,
                 &mut packet_count,
                 &mut frame_count,
-                start_time,
+                &mut progress_state,
+                &stream_time_bases,
                 ssim_filter,
                 audio_resampler,
             )?;
@@ -1315,11 +1353,11 @@ fn run_transcode_pipeline<M: Muxer>(
         _ => return Err(format!("Unsupported input format: {}", input_ext).into()),
     }
 
-    if progress {
-        println!();
+    if let Some(ps) = &progress_state {
+        ps.finish();
     }
 
-    println!(
+    eprintln!(
         "Processed {} packets, {} frames in {:.2}s",
         packet_count,
         frame_count,
@@ -1343,11 +1381,12 @@ fn process_packets<D: Demuxer, M: Muxer>(
     audio_encoder: &mut Option<Box<dyn EncoderWrapper>>,
     video_codec: &str,
     audio_codec: &str,
-    duration: Option<i64>,
-    progress: bool,
+    _duration: Option<i64>,
+    _progress: bool,
     packet_count: &mut usize,
     frame_count: &mut usize,
-    start_time: std::time::Instant,
+    progress_state: &mut Option<ProgressState>,
+    stream_time_bases: &[(u32, u32)],
     ssim_filter: &mut Option<SsimFilterContext>,
     audio_resampler: &Option<AudioResampler>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1376,6 +1415,15 @@ fn process_packets<D: Demuxer, M: Muxer>(
                 let stream_idx = packet.stream_index();
                 *packet_count += 1;
 
+                // Update progress (convert PTS to microseconds using stream timebase)
+                if let Some(ps) = progress_state.as_mut() {
+                    let pts_us = packet.pts().map(|p| {
+                        let tb = stream_time_bases.get(stream_idx).copied().unwrap_or((1, 1_000_000));
+                        if tb.1 > 0 { p * tb.0 as i64 * 1_000_000 / tb.1 as i64 } else { p }
+                    });
+                    ps.update(pts_us, packet.size());
+                }
+
                 // Handle video packet
                 if Some(stream_idx) == video_in_idx {
                     if let Some(out_idx) = video_out_idx {
@@ -1399,9 +1447,6 @@ fn process_packets<D: Demuxer, M: Muxer>(
                                     }
                                 }
 
-                                if progress && (*frame_count).is_multiple_of(100) {
-                                    print_progress(frame.pts(), duration, start_time);
-                                }
 
                                 // Push into reorder buffer; encode frames that are ready
                                 reorder_buf.push(frame);
@@ -1514,18 +1559,97 @@ fn process_packets<D: Demuxer, M: Muxer>(
     Ok(())
 }
 
-fn print_progress(pts: Option<i64>, duration: Option<i64>, start_time: std::time::Instant) {
-    if let (Some(pts), Some(dur)) = (pts, duration) {
-        if dur > 0 {
-            let progress_pct = (pts as f64 / dur as f64 * 100.0).min(100.0);
-            let elapsed = start_time.elapsed().as_secs_f64();
-            print!(
-                "\rProgress: {:.1}% ({:.1}s elapsed)    ",
-                progress_pct, elapsed
-            );
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
+/// Tracks progress state for ffmpeg-style status line output.
+struct ProgressState {
+    start_time: std::time::Instant,
+    last_print: std::time::Instant,
+    total_size: u64,
+    last_pts_us: Option<i64>,
+}
+
+impl ProgressState {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            start_time: now,
+            last_print: now,
+            total_size: 0,
+            last_pts_us: None,
         }
+    }
+
+    /// Update progress with a processed packet. Prints at most every 500ms.
+    /// `pts_us` should be pre-converted to microseconds by the caller.
+    /// `pts` should already be converted to microseconds by the caller,
+    /// or use `update_with_timebase` for raw PTS values.
+    fn update(&mut self, pts_us: Option<i64>, packet_size: usize) {
+        self.total_size += packet_size as u64;
+        if let Some(us) = pts_us {
+            // Only update if this is a larger timestamp (avoids audio/video interleaving jitter)
+            if self.last_pts_us.is_none_or(|prev| us > prev) {
+                self.last_pts_us = Some(us);
+            }
+        }
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_print).as_millis() < 500 {
+            return;
+        }
+        self.last_print = now;
+        self.print();
+    }
+
+    /// Force-print the current status (used at end of transcode).
+    fn finish(&self) {
+        self.print();
+        eprintln!();
+    }
+
+    fn print(&self) {
+        use std::io::Write;
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let pts_us = self.last_pts_us;
+
+        // Time position
+        let time_str = match pts_us {
+            Some(us) if us >= 0 => {
+                let secs = us as f64 / 1_000_000.0;
+                let h = (secs / 3600.0) as u64;
+                let m = ((secs % 3600.0) / 60.0) as u64;
+                let s = secs % 60.0;
+                format!("{:02}:{:02}:{:05.2}", h, m, s)
+            }
+            _ => "N/A".to_string(),
+        };
+
+        // Speed (media seconds per wall second)
+        let speed_str = match pts_us {
+            Some(us) if us > 0 && elapsed > 0.1 => {
+                let media_secs = us as f64 / 1_000_000.0;
+                format!("{:.2}x", media_secs / elapsed)
+            }
+            _ => "N/A".to_string(),
+        };
+
+        // Output size
+        let size_str = if self.total_size > 1_000_000 {
+            format!("{:.1}MB", self.total_size as f64 / 1_000_000.0)
+        } else {
+            format!("{:.0}kB", self.total_size as f64 / 1_000.0)
+        };
+
+        // Bitrate
+        let bitrate_str = if elapsed > 0.5 {
+            let kbits = (self.total_size as f64 * 8.0) / (elapsed * 1000.0);
+            format!("{:.1}kbits/s", kbits)
+        } else {
+            "N/A".to_string()
+        };
+
+        eprint!(
+            "\rtime={} bitrate={} size={} speed={}    ",
+            time_str, bitrate_str, size_str, speed_str
+        );
+        let _ = std::io::stderr().flush();
     }
 }
 
