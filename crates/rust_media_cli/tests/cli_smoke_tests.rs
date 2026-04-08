@@ -370,6 +370,119 @@ fn transform_volume_filter_accepts_linear_value() {
 }
 
 #[test]
+fn transform_scale_filter_resizes_video() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm"); // 640x480
+
+    // Downscale to 320x240
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=320:240",
+        ])
+        .assert()
+        .success();
+
+    // Verify output dimensions via info JSON
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    assert!(info_output.status.success());
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 320);
+    assert_eq!(stream["height"], 240);
+}
+
+#[test]
+fn transform_scale_filter_named_syntax() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=w=160:h=120",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 160);
+    assert_eq!(stream["height"], 120);
+}
+
+#[test]
+fn transform_scale_filter_rejects_video_copy() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("out.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "copy",
+            "--no-audio",
+            "--vf",
+            "scale=320:240",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("scale filter requires video transcoding"));
+}
+
+#[test]
+fn transform_scale_filter_rejects_odd_dimensions() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("out.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=321:240",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("even"));
+}
+
+#[test]
 fn transform_volume_filter_accepts_db_value() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("out.webm");

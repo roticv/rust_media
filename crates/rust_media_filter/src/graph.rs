@@ -5,11 +5,20 @@
 
 use std::collections::HashMap;
 
-/// Parsed filter specification with name and parameters
+/// Parsed filter specification with name and parameters.
+///
+/// Both named (`key=value`) and positional (just `value`) parameters are
+/// supported. Named params are stored in `params`. Positional params (parts
+/// without `=`) are stored in `positional` in their original order, and also
+/// inserted into `params` with the value `"true"` so flag-style queries
+/// (`has_flag`) keep working.
 #[derive(Debug, Clone)]
 pub struct Filter {
     pub name: String,
     pub params: HashMap<String, String>,
+    /// Positional arguments in original order (parts of the filter spec
+    /// that don't contain `=`).
+    pub positional: Vec<String>,
 }
 
 /// Filter graph containing a chain of filters
@@ -44,7 +53,7 @@ impl FilterGraph {
 
 impl Filter {
     /// Parse a single filter specification
-    /// Format: "filter_name=param1=value1:param2=value2" or "filter_name"
+    /// Format: "filter_name=param1=value1:param2=value2" or "filter_name=val1:val2"
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut parts = spec.splitn(2, '=');
         let name = parts.next().unwrap_or("").trim().to_string();
@@ -54,6 +63,7 @@ impl Filter {
         }
 
         let mut params = HashMap::new();
+        let mut positional = Vec::new();
 
         if let Some(params_str) = parts.next() {
             let param_parts: Vec<&str> = params_str.split(':').collect();
@@ -67,13 +77,18 @@ impl Filter {
                 if let Some((key, value)) = part.split_once('=') {
                     params.insert(key.trim().to_string(), value.trim().to_string());
                 } else {
-                    // Flag-style parameter (e.g., "print_per_frame")
+                    // Positional / flag-style parameter
+                    positional.push(part.to_string());
                     params.insert(part.to_string(), "true".to_string());
                 }
             }
         }
 
-        Ok(Filter { name, params })
+        Ok(Filter {
+            name,
+            params,
+            positional,
+        })
     }
 
     /// Get a parameter value
@@ -126,5 +141,23 @@ mod tests {
     #[test]
     fn test_empty_filter_graph() {
         assert!(FilterGraph::parse("").is_err());
+    }
+
+    #[test]
+    fn test_positional_args_preserve_order() {
+        // scale=640:480 — order matters (W, H)
+        let f = Filter::parse("scale=640:480").unwrap();
+        assert_eq!(f.name, "scale");
+        assert_eq!(f.positional, vec!["640", "480"]);
+        // Both are also accessible via params (as flags)
+        assert!(f.has_flag("640"));
+        assert!(f.has_flag("480"));
+    }
+
+    #[test]
+    fn test_mixed_positional_and_named() {
+        let f = Filter::parse("filter=val1:key=value:val2").unwrap();
+        assert_eq!(f.positional, vec!["val1", "val2"]);
+        assert_eq!(f.get_param("key"), Some("value"));
     }
 }

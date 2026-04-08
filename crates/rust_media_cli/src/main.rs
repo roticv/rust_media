@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use rust_media_filter::audio::{AudioResampler, VolumeFilter};
 use rust_media_filter::video::ssim::{calculate_frame_ssim, ssim_to_db};
+use rust_media_filter::video::ScaleFilter;
 use rust_media_filter::{Filter, FilterGraph};
 use rust_media::{
     AudioStreamParams, Decoder, Demuxer, Encoder, Frame, FrameReorderBuffer, MediaType, Muxer,
@@ -654,6 +655,7 @@ fn run_transform(
 
     // Parse video filter graph and create filter context
     let mut ssim_filter: Option<SsimFilterContext> = None;
+    let mut scale_filter: Option<ScaleFilter> = None;
 
     if let Some(filter_str) = video_filter {
         let filter_graph = FilterGraph::parse(filter_str)
@@ -672,6 +674,19 @@ fn run_transform(
                     println!("Filter: SSIM comparison (reference={}, distorted={})",
                              inputs[0].display(), inputs[1].display());
                     ssim_filter = Some(SsimFilterContext::new(&inputs[1], filter)?);
+                }
+                "scale" => {
+                    if video_codec == "copy" {
+                        return Err("scale filter requires video transcoding (cannot use with -v copy)".into());
+                    }
+                    // Accept both `scale=w=640:h=480` and `scale=640:480` (positional)
+                    let (w, h) = parse_scale_dimensions(filter)
+                        .map_err(|e| format!("scale filter: {}", e))?;
+                    println!("Filter: scale ({}x{}, bilinear)", w, h);
+                    scale_filter = Some(
+                        ScaleFilter::new(w, h)
+                            .map_err(|e| format!("scale filter: {}", e))?,
+                    );
                 }
                 _ => {
                     return Err(format!("Unknown video filter: {}", filter.name).into());
@@ -783,6 +798,7 @@ fn run_transform(
                 duration,
                 progress,
                 &mut ssim_filter,
+                &scale_filter,
                 &mut audio_resampler,
                 &volume_filter,
             )?;
@@ -800,6 +816,7 @@ fn run_transform(
                 duration,
                 progress,
                 &mut ssim_filter,
+                &scale_filter,
                 &mut audio_resampler,
                 &volume_filter,
             )?;
@@ -846,6 +863,7 @@ fn transcode_to_mp4(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
+    scale_filter: &Option<ScaleFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -870,6 +888,13 @@ fn transcode_to_mp4(
             out_stream.index = current_out_idx;
             out_stream.codec = out_codec;
             out_stream.bitrate = Some(video_bitrate);
+            // Apply scale filter dimensions if active
+            if let Some(sf) = scale_filter {
+                if let StreamParams::Video(ref mut vp) = out_stream.params {
+                    vp.width = sf.target_width();
+                    vp.height = sf.target_height();
+                }
+            }
             muxer.add_stream(out_stream)?;
             video_out_idx = Some(current_out_idx);
             current_out_idx += 1;
@@ -922,6 +947,7 @@ fn transcode_to_mp4(
         duration,
         progress,
         ssim_filter,
+        scale_filter,
         audio_resampler,
         volume_filter,
     )?;
@@ -949,6 +975,7 @@ fn transcode_to_webm(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
+    scale_filter: &Option<ScaleFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -985,6 +1012,13 @@ fn transcode_to_webm(
             out_stream.index = current_out_idx;
             out_stream.codec = out_codec;
             out_stream.bitrate = Some(video_bitrate);
+            // Apply scale filter dimensions if active
+            if let Some(sf) = scale_filter {
+                if let StreamParams::Video(ref mut vp) = out_stream.params {
+                    vp.width = sf.target_width();
+                    vp.height = sf.target_height();
+                }
+            }
             muxer.add_stream(out_stream)?;
             video_out_idx = Some(current_out_idx);
             current_out_idx += 1;
@@ -1036,6 +1070,7 @@ fn transcode_to_webm(
         duration,
         progress,
         ssim_filter,
+        scale_filter,
         audio_resampler,
         volume_filter,
     )?;
@@ -1195,6 +1230,7 @@ fn run_transcode_pipeline<M: Muxer>(
     duration: Option<i64>,
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
+    scale_filter: &Option<ScaleFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1210,8 +1246,21 @@ fn run_transcode_pipeline<M: Muxer>(
     // Setup video pipeline
     if let Some(ref vs) = video_stream {
         if video_codec != "none" && video_codec != "copy" {
+            // Decoder uses original (source) dimensions from `vs`
             video_decoder = Some(create_decoder_for_stream(vs)?);
-            video_encoder = Some(create_video_encoder(vs, video_codec, video_bitrate)?);
+
+            // Encoder uses scaled dimensions if a scale filter is active
+            let encoder_stream = if let Some(sf) = scale_filter {
+                let mut s = vs.clone();
+                if let StreamParams::Video(ref mut vp) = s.params {
+                    vp.width = sf.target_width();
+                    vp.height = sf.target_height();
+                }
+                s
+            } else {
+                vs.clone()
+            };
+            video_encoder = Some(create_video_encoder(&encoder_stream, video_codec, video_bitrate)?);
         }
     }
 
@@ -1274,6 +1323,7 @@ fn run_transcode_pipeline<M: Muxer>(
         &mut progress_state,
         &stream_time_bases,
         ssim_filter,
+        scale_filter,
         audio_resampler,
         volume_filter,
     )?;
@@ -1313,6 +1363,7 @@ fn process_packets<M: Muxer>(
     progress_state: &mut Option<ProgressState>,
     stream_time_bases: &[(u32, u32)],
     ssim_filter: &mut Option<SsimFilterContext>,
+    scale_filter: &Option<ScaleFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1379,6 +1430,12 @@ fn process_packets<M: Muxer>(
                                     }
                                 }
 
+                                // Apply scale filter if enabled
+                                let frame = if let Some(sf) = scale_filter {
+                                    sf.process(&frame)?
+                                } else {
+                                    frame
+                                };
 
                                 // Push into reorder buffer; encode frames that are ready
                                 reorder_buf.push(frame);
@@ -1442,6 +1499,13 @@ fn process_packets<M: Muxer>(
                     eprintln!("Warning: SSIM filter error during flush: {}", e);
                 }
             }
+
+            // Apply scale filter if enabled
+            let frame = if let Some(sf) = scale_filter {
+                sf.process(&frame)?
+            } else {
+                frame
+            };
 
             reorder_buf.push(frame);
             while let Some(ordered_frame) = reorder_buf.pop_ready() {
@@ -1772,6 +1836,44 @@ fn create_video_encoder(
 
 /// Returns the nearest supported sample rate for the given encoder codec,
 /// or None if the rate is already supported.
+/// Parse `scale` filter dimensions from a Filter spec.
+///
+/// Accepts both ffmpeg-style positional syntax (`scale=640:480`) and named
+/// syntax (`scale=w=640:h=480` or `scale=width=640:height=480`).
+fn parse_scale_dimensions(filter: &Filter) -> Result<(usize, usize), String> {
+    // Named form: w=W:h=H or width=W:height=H
+    if let Some(w_str) = filter
+        .get_param("w")
+        .or_else(|| filter.get_param("width"))
+    {
+        let h_str = filter
+            .get_param("h")
+            .or_else(|| filter.get_param("height"))
+            .ok_or("missing height (use h=H or height=H)")?;
+        let w = w_str
+            .parse::<usize>()
+            .map_err(|_| format!("invalid width: {}", w_str))?;
+        let h = h_str
+            .parse::<usize>()
+            .map_err(|_| format!("invalid height: {}", h_str))?;
+        return Ok((w, h));
+    }
+
+    // Positional form: scale=W:H (uses Filter.positional which preserves order)
+    if filter.positional.len() == 2 {
+        let w = filter.positional[0]
+            .parse::<usize>()
+            .map_err(|_| format!("invalid width: {}", filter.positional[0]))?;
+        let h = filter.positional[1]
+            .parse::<usize>()
+            .map_err(|_| format!("invalid height: {}", filter.positional[1]))?;
+        return Ok((w, h));
+    }
+
+    Err("scale filter requires width and height (e.g., scale=640:480 or scale=w=640:h=480)"
+        .to_string())
+}
+
 fn nearest_supported_sample_rate(codec: &str, input_rate: u32) -> Option<u32> {
     let supported: &[u32] = match codec {
         "opus" => &[8000, 12000, 16000, 24000, 48000],
