@@ -483,6 +483,174 @@ fn transform_scale_filter_rejects_odd_dimensions() {
 }
 
 #[test]
+fn transform_crop_filter_centered() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("cropped.webm");
+    let input = test_asset("test_vp9.webm"); // 640x480
+
+    // Centered crop to 320x240
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "crop=320:240",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 320);
+    assert_eq!(stream["height"], 240);
+}
+
+#[test]
+fn transform_crop_filter_with_explicit_offset() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("cropped.webm");
+    let input = test_asset("test_vp9.webm");
+
+    // crop=W:H:X:Y positional syntax
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "crop=160:120:80:60",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 160);
+    assert_eq!(stream["height"], 120);
+}
+
+#[test]
+fn transform_crop_filter_named_syntax() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("cropped.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "crop=w=160:h=120:x=240:y=180",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn transform_crop_then_scale_chains_filters() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("cropped_scaled.webm");
+    let input = test_asset("test_vp9.webm"); // 640x480
+
+    // Crop to 320x240, then scale to 160x120
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "crop=320:240,scale=160:120",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    // Final dimensions should be from the scale filter
+    assert_eq!(stream["width"], 160);
+    assert_eq!(stream["height"], 120);
+}
+
+#[test]
+fn transform_crop_filter_rejects_video_copy() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("out.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "copy",
+            "--no-audio",
+            "--vf",
+            "crop=320:240",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("crop filter requires video transcoding"));
+}
+
+#[test]
+fn transform_crop_filter_rejects_oversize() {
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("out.webm");
+    let input = test_asset("test_vp9.webm"); // 640x480
+
+    // Try to crop to a larger size than the source
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "crop=1280:720",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn transform_volume_filter_accepts_db_value() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("out.webm");

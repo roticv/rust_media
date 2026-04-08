@@ -101,9 +101,9 @@ rust_media/
 │   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations
-│   │   ├── Video: SSIM ✅; scale, crop, overlay, rotate (planned)
-│   │   ├── Audio: resample ✅, volume ✅; mix (planned)
-│   │   └── Filter graph parsing (FFmpeg-like syntax) ✅
+│   │   ├── Video: scale ✅ (bilinear), crop ✅, SSIM ✅; overlay, rotate (planned)
+│   │   ├── Audio: resample ✅ (sinc/rubato), volume ✅; mix (planned)
+│   │   └── Filter graph parsing (FFmpeg-like syntax, named + positional) ✅
 │   │
 │   ├── rust_media/         # Main library (re-exports)
 │   │   └── Convenience crate that re-exports all components
@@ -231,13 +231,28 @@ Implement Packet and Frame abstractions with support for various media types. Th
 
 **Status**: Core types (Packet, Frame) and all traits (Demuxer, Decoder, Encoder, Muxer) are implemented in `rust_media_core`.
 
-#### 2. Integration Test Framework 🚧 PLANNED
-Build comprehensive testing infrastructure including:
-- Demuxing/decoding validation
-- Encoding/muxing validation
-- Quality metrics (SSIM for video, others for audio)
-- Performance benchmarking
-- Reference file generation and comparison
+#### 2. Integration Test Framework 🚧 IN PROGRESS
+
+**Status**: Foundation in place. Round-trip integration tests for major codecs and CLI smoke tests cover the surface.
+
+**Implemented**:
+- **Pure-Rust test source generators** in `rust_media_codec/tests/common/mod.rs` and `rust_media_format/tests/common/mod.rs`:
+  - `sine_wave_frame()` / `sine_wave_frames()` — generate sine waves at any frequency/sample rate
+  - `solid_color_frame()` / `color_ramp_frames()` — generate YUV420P video frames with known content
+  - Analysis helpers: `rms()`, `estimate_frequency_zero_crossings()`, `mean_y()`
+- **Codec round-trip tests** (`rust_media_codec/tests/`) — encode → decode → verify content preservation:
+  - `opus_roundtrip_test`: 1 kHz sine → Opus → recover frequency + RMS within tolerance
+  - `vp8_roundtrip_test`, `vp9_roundtrip_test`: color ramp → encode → verify per-frame mean Y
+  - `h264_roundtrip_test` (gpl-x264): exercises B-frame reordering through the POC reorder buffer
+  - `aac_roundtrip_test` (fdk-aac): sine wave with AudioSpecificConfig wiring
+- **MP4 full pipeline test** (`rust_media_format/tests/mp4_roundtrip_test.rs`): generate → encode (VP9 + Opus) → mux to MP4 → demux → decode → verify content. Exercises sample tables, codec config records, stream metadata round-trip.
+- **CLI smoke tests** (`rust_media_cli/tests/cli_smoke_tests.rs`) using `assert_cmd`: exit codes, error messages on stderr, stdout/stderr separation, format detection edge cases, filter parsing errors, help output. Complements the existing JSON-validation tests in `integration_tests.rs`.
+
+**Key principle**: All round-trip and pipeline tests **generate test content in pure Rust** — no committed binary fixtures, no `ffmpeg` dependency. Verification uses tolerance-based metrics (frequency, RMS, mean luma) since lossy codecs can't preserve exact byte-level content.
+
+**Planned**:
+- Performance benchmarking suite
+- Reference comparison against ffmpeg output (where available)
 
 #### 3. Container Format and Codec Support 🚧 IN PROGRESS
 
@@ -350,22 +365,25 @@ Build a flexible filtering system that:
 - Handles video and audio processing
 - Enables common operations (scaling, cropping, mixing, etc.)
 
-**Status**: Foundation implemented in `rust_media_filter` crate. Filter graph parsing, audio resampling (sinc), volume, and SSIM video quality metric are available. Auto-resampling on sample rate mismatch. More filters planned.
+**Status**: Foundation implemented in `rust_media_filter` crate. Filter graph parsing, audio resampling, volume, video scale, video crop, and SSIM video quality metric are available. Auto-resampling on sample rate mismatch. More filters planned.
 
 **Implemented**:
-- **Filter graph parsing**: FFmpeg-like syntax (`filter_name=param1=value1:param2=value2`, comma-separated chains)
+- **Filter graph parsing**: FFmpeg-like syntax (`filter_name=param1=value1:param2=value2`, comma-separated chains). Supports both named and positional arguments.
 - **aresample**: Audio resampling via sinc interpolation (rubato, Kaiser-windowed polyphase filter)
 - **volume**: Audio volume/gain adjustment (linear factor or dB, e.g., `volume=0.5`, `volume=6dB`)
+- **scale**: Bilinear video scaling. Syntax: `scale=W:H` or `scale=w=W:h=H`. Requires even dimensions for YUV420P chroma alignment.
+- **crop**: Video cropping. Syntax: `crop=W:H` (centered), `crop=W:H:X:Y` (positional with offset), or `crop=w=W:h=H:x=X:y=Y` (named). Requires even dimensions and offsets.
 - **ssim**: SSIM quality comparison between two video streams
 - **Auto-resample**: Automatically resamples when encoder requires a different sample rate (e.g., MP3 44100 Hz → Opus 48000 Hz)
 - **Format detection**: Magic bytes detection with file extension fallback (`rust_media_format::detect`)
 - CLI integration via `--af` (audio filters) and `--vf` (video filters)
+- **Filter pipeline order**: For video, the chain is `decode → SSIM → crop → scale → encode`, so chained filters like `--vf "crop=320:240,scale=160:120"` produce a final 160x120 output.
 
 **Key Requirements** (for future filters):
 - **Streaming API**: Filters must operate on frames incrementally (send/receive pattern)
 - **Graph construction**: Support both programmatic and CLI-based filter graph creation
 - **Zero-copy where possible**: Minimize frame copying in filter chains
-- **Common filters**: Scale, crop, overlay, rotate, format conversion, audio mixing
+- **Common filters**: Overlay, rotate, format conversion, audio mixing
 
 #### 6. FFmpeg CLI Compatibility 🚧 PLANNED
 Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing migration and adoption.

@@ -56,7 +56,23 @@ cargo test -p rust_media_core
 
 # Run CLI integration tests (tests info and transform commands)
 cargo test -p rust_media_cli --test integration_tests
+
+# Run CLI smoke tests (exit codes, error handling, stderr/stdout routing)
+cargo test -p rust_media_cli --test cli_smoke_tests
+
+# Run codec round-trip tests (uses generated sine waves and color ramps,
+# no binary fixtures needed)
+cargo test -p rust_media_codec --test opus_roundtrip_test
+cargo test -p rust_media_codec --test vp8_roundtrip_test
+cargo test -p rust_media_codec --test vp9_roundtrip_test
+
+# Run end-to-end MP4 pipeline test (encode → mux → demux → decode → verify)
+cargo test -p rust_media_format --test mp4_roundtrip_test
 ```
+
+The codec round-trip and MP4 pipeline tests **generate test content in pure
+Rust** (sine waves, color ramps, gradients) and verify the full pipeline
+without any committed binary fixtures or external `ffmpeg` dependency.
 
 ## Architecture
 
@@ -111,6 +127,8 @@ This project is in active development. Current status:
 ### Filters
 - ✅ **aresample** - Audio resampling (sinc interpolation via rubato)
 - ✅ **volume** - Audio volume/gain adjustment (linear or dB)
+- ✅ **scale** - Bilinear video scaling (resize to any even dimensions)
+- ✅ **crop** - Video cropping (centered or explicit offset)
 - ✅ **ssim** - Video SSIM quality comparison
 - ✅ Auto-resample when encoder requires a different sample rate
 
@@ -126,7 +144,7 @@ This project is in active development. Current status:
   - Stream copy (passthrough)
   - Bitrate control
   - Audio filters (`--af`): resampling, volume (`--af "volume=0.5,aresample=48000"`)
-  - Video filters (`--vf`): SSIM quality comparison (`--vf ssim`)
+  - Video filters (`--vf`): scale, crop, SSIM quality comparison (`--vf "crop=320:240,scale=160:120"`)
   - Auto-resampling when encoder requires a different sample rate
   - ffmpeg-style progress output (`--progress`)
   - See [rust_media_cli documentation](crates/rust_media_cli/README.md) for details

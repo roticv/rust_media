@@ -5,7 +5,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use rust_media_filter::audio::{AudioResampler, VolumeFilter};
 use rust_media_filter::video::ssim::{calculate_frame_ssim, ssim_to_db};
-use rust_media_filter::video::ScaleFilter;
+use rust_media_filter::video::{CropFilter, ScaleFilter};
 use rust_media_filter::{Filter, FilterGraph};
 use rust_media::{
     AudioStreamParams, Decoder, Demuxer, Encoder, Frame, FrameReorderBuffer, MediaType, Muxer,
@@ -656,6 +656,7 @@ fn run_transform(
     // Parse video filter graph and create filter context
     let mut ssim_filter: Option<SsimFilterContext> = None;
     let mut scale_filter: Option<ScaleFilter> = None;
+    let mut crop_filter: Option<CropFilter> = None;
 
     if let Some(filter_str) = video_filter {
         let filter_graph = FilterGraph::parse(filter_str)
@@ -686,6 +687,23 @@ fn run_transform(
                     scale_filter = Some(
                         ScaleFilter::new(w, h)
                             .map_err(|e| format!("scale filter: {}", e))?,
+                    );
+                }
+                "crop" => {
+                    if video_codec == "copy" {
+                        return Err("crop filter requires video transcoding (cannot use with -v copy)".into());
+                    }
+                    // Accept `crop=W:H:X:Y`, `crop=W:H` (centered), or
+                    // `crop=w=W:h=H:x=X:y=Y`
+                    let (w, h, x, y) = parse_crop_params(filter)
+                        .map_err(|e| format!("crop filter: {}", e))?;
+                    match (x, y) {
+                        (Some(x), Some(y)) => println!("Filter: crop ({}x{} at {},{})", w, h, x, y),
+                        _ => println!("Filter: crop ({}x{}, centered)", w, h),
+                    }
+                    crop_filter = Some(
+                        CropFilter::new(w, h, x, y)
+                            .map_err(|e| format!("crop filter: {}", e))?,
                     );
                 }
                 _ => {
@@ -799,6 +817,7 @@ fn run_transform(
                 progress,
                 &mut ssim_filter,
                 &scale_filter,
+                &crop_filter,
                 &mut audio_resampler,
                 &volume_filter,
             )?;
@@ -817,6 +836,7 @@ fn run_transform(
                 progress,
                 &mut ssim_filter,
                 &scale_filter,
+                &crop_filter,
                 &mut audio_resampler,
                 &volume_filter,
             )?;
@@ -864,6 +884,7 @@ fn transcode_to_mp4(
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
     scale_filter: &Option<ScaleFilter>,
+    crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -888,7 +909,14 @@ fn transcode_to_mp4(
             out_stream.index = current_out_idx;
             out_stream.codec = out_codec;
             out_stream.bitrate = Some(video_bitrate);
-            // Apply scale filter dimensions if active
+            // Apply crop dimensions first, then scale (chain order matches the
+            // pipeline: crop runs before scale).
+            if let Some(cf) = crop_filter {
+                if let StreamParams::Video(ref mut vp) = out_stream.params {
+                    vp.width = cf.width();
+                    vp.height = cf.height();
+                }
+            }
             if let Some(sf) = scale_filter {
                 if let StreamParams::Video(ref mut vp) = out_stream.params {
                     vp.width = sf.target_width();
@@ -948,6 +976,7 @@ fn transcode_to_mp4(
         progress,
         ssim_filter,
         scale_filter,
+        crop_filter,
         audio_resampler,
         volume_filter,
     )?;
@@ -976,6 +1005,7 @@ fn transcode_to_webm(
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
     scale_filter: &Option<ScaleFilter>,
+    crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1012,7 +1042,14 @@ fn transcode_to_webm(
             out_stream.index = current_out_idx;
             out_stream.codec = out_codec;
             out_stream.bitrate = Some(video_bitrate);
-            // Apply scale filter dimensions if active
+            // Apply crop dimensions first, then scale (chain order matches the
+            // pipeline: crop runs before scale).
+            if let Some(cf) = crop_filter {
+                if let StreamParams::Video(ref mut vp) = out_stream.params {
+                    vp.width = cf.width();
+                    vp.height = cf.height();
+                }
+            }
             if let Some(sf) = scale_filter {
                 if let StreamParams::Video(ref mut vp) = out_stream.params {
                     vp.width = sf.target_width();
@@ -1071,6 +1108,7 @@ fn transcode_to_webm(
         progress,
         ssim_filter,
         scale_filter,
+        crop_filter,
         audio_resampler,
         volume_filter,
     )?;
@@ -1231,6 +1269,7 @@ fn run_transcode_pipeline<M: Muxer>(
     progress: bool,
     ssim_filter: &mut Option<SsimFilterContext>,
     scale_filter: &Option<ScaleFilter>,
+    crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1249,17 +1288,21 @@ fn run_transcode_pipeline<M: Muxer>(
             // Decoder uses original (source) dimensions from `vs`
             video_decoder = Some(create_decoder_for_stream(vs)?);
 
-            // Encoder uses scaled dimensions if a scale filter is active
-            let encoder_stream = if let Some(sf) = scale_filter {
-                let mut s = vs.clone();
-                if let StreamParams::Video(ref mut vp) = s.params {
+            // Encoder uses crop and/or scale dimensions if filters are active.
+            // Order: crop applies first, then scale, so scale (if set) wins.
+            let mut encoder_stream = vs.clone();
+            if let Some(cf) = crop_filter {
+                if let StreamParams::Video(ref mut vp) = encoder_stream.params {
+                    vp.width = cf.width();
+                    vp.height = cf.height();
+                }
+            }
+            if let Some(sf) = scale_filter {
+                if let StreamParams::Video(ref mut vp) = encoder_stream.params {
                     vp.width = sf.target_width();
                     vp.height = sf.target_height();
                 }
-                s
-            } else {
-                vs.clone()
-            };
+            }
             video_encoder = Some(create_video_encoder(&encoder_stream, video_codec, video_bitrate)?);
         }
     }
@@ -1324,6 +1367,7 @@ fn run_transcode_pipeline<M: Muxer>(
         &stream_time_bases,
         ssim_filter,
         scale_filter,
+        crop_filter,
         audio_resampler,
         volume_filter,
     )?;
@@ -1364,6 +1408,7 @@ fn process_packets<M: Muxer>(
     stream_time_bases: &[(u32, u32)],
     ssim_filter: &mut Option<SsimFilterContext>,
     scale_filter: &Option<ScaleFilter>,
+    crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1429,6 +1474,13 @@ fn process_packets<M: Muxer>(
                                         eprintln!("Warning: SSIM filter error: {}", e);
                                     }
                                 }
+
+                                // Apply crop filter (runs before scale)
+                                let frame = if let Some(cf) = crop_filter {
+                                    cf.process(&frame)?
+                                } else {
+                                    frame
+                                };
 
                                 // Apply scale filter if enabled
                                 let frame = if let Some(sf) = scale_filter {
@@ -1499,6 +1551,13 @@ fn process_packets<M: Muxer>(
                     eprintln!("Warning: SSIM filter error during flush: {}", e);
                 }
             }
+
+            // Apply crop filter (runs before scale)
+            let frame = if let Some(cf) = crop_filter {
+                cf.process(&frame)?
+            } else {
+                frame
+            };
 
             // Apply scale filter if enabled
             let frame = if let Some(sf) = scale_filter {
@@ -1872,6 +1931,77 @@ fn parse_scale_dimensions(filter: &Filter) -> Result<(usize, usize), String> {
 
     Err("scale filter requires width and height (e.g., scale=640:480 or scale=w=640:h=480)"
         .to_string())
+}
+
+/// Parse `crop` filter parameters from a Filter spec.
+///
+/// Accepts:
+/// - `crop=W:H` (centered, X and Y default to centered)
+/// - `crop=W:H:X:Y` (positional, all four)
+/// - `crop=w=W:h=H[:x=X][:y=Y]` (named)
+///
+/// Returns `(width, height, x, y)` where x/y are None if centered.
+#[allow(clippy::type_complexity)]
+fn parse_crop_params(
+    filter: &Filter,
+) -> Result<(usize, usize, Option<usize>, Option<usize>), String> {
+    // Named form: w=W:h=H[:x=X][:y=Y] or width/height/x/y
+    if let Some(w_str) = filter
+        .get_param("w")
+        .or_else(|| filter.get_param("width"))
+    {
+        let h_str = filter
+            .get_param("h")
+            .or_else(|| filter.get_param("height"))
+            .ok_or("missing height (use h=H or height=H)")?;
+        let w = w_str
+            .parse::<usize>()
+            .map_err(|_| format!("invalid width: {}", w_str))?;
+        let h = h_str
+            .parse::<usize>()
+            .map_err(|_| format!("invalid height: {}", h_str))?;
+        let x = filter
+            .get_param("x")
+            .map(|s| s.parse::<usize>().map_err(|_| format!("invalid x: {}", s)))
+            .transpose()?;
+        let y = filter
+            .get_param("y")
+            .map(|s| s.parse::<usize>().map_err(|_| format!("invalid y: {}", s)))
+            .transpose()?;
+        return Ok((w, h, x, y));
+    }
+
+    // Positional form: W:H or W:H:X:Y
+    match filter.positional.len() {
+        2 => {
+            let w = filter.positional[0]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid width: {}", filter.positional[0]))?;
+            let h = filter.positional[1]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid height: {}", filter.positional[1]))?;
+            Ok((w, h, None, None))
+        }
+        4 => {
+            let w = filter.positional[0]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid width: {}", filter.positional[0]))?;
+            let h = filter.positional[1]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid height: {}", filter.positional[1]))?;
+            let x = filter.positional[2]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid x: {}", filter.positional[2]))?;
+            let y = filter.positional[3]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid y: {}", filter.positional[3]))?;
+            Ok((w, h, Some(x), Some(y)))
+        }
+        _ => Err(
+            "crop filter requires width:height or width:height:x:y (e.g., crop=320:240 or crop=320:240:160:120)"
+                .to_string(),
+        ),
+    }
 }
 
 fn nearest_supported_sample_rate(codec: &str, input_rate: u32) -> Option<u32> {
