@@ -93,8 +93,8 @@ rust_media/
 │   ├── rust_media_format/  # Container format implementations
 │   │   ├── WAV demuxer/muxer ✅
 │   │   ├── WebM demuxer/muxer ✅
-│   │   ├── MP4 demuxer/muxer ✅
-│   │   └── MKV demuxer/muxer (planned)
+│   │   ├── MKV demuxer ✅ (shares EBML parser with WebM, supports H.264/H.265/AAC/MP3/etc.)
+│   │   └── MP4 demuxer/muxer ✅
 │   │
 │   ├── rust_media_codec/   # Codec implementations
 │   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode), AV1 (planned)
@@ -245,11 +245,18 @@ Build comprehensive testing infrastructure including:
 
 **Container Formats** (demuxers/muxers):
 - ✅ **WAV** (RIFF WAVE): PCM audio demuxer/muxer **IMPLEMENTED** in `rust_media_format/src/wav/`
-- ✅ **WebM** (Matroska subset): VP8/VP9/Opus demuxer/muxer **IMPLEMENTED** in `rust_media_format/src/webm/`
-  - Supports VP8, VP9, and Opus codecs
+- ✅ **WebM** (Matroska subset): Demuxer/muxer **IMPLEMENTED** in `rust_media_format/src/webm/`
+  - Supports VP8, VP9, AV1 video and Opus, Vorbis audio
   - Streaming API with incremental packet processing
   - Efficient: ~50% less overhead than FFmpeg output (363 bytes vs 711 bytes)
   - See `examples/webm_remux.rs` for usage
+- ✅ **MKV** (Matroska): Demuxer **IMPLEMENTED** in `rust_media_format/src/mkv/` (re-exports `WebmDemuxer`)
+  - Shares EBML parser with WebM (same container format, MKV is a superset)
+  - Supports H.264 (V_MPEG4/ISO/AVC), H.265/HEVC (V_MPEGH/ISO/HEVC), VP8/VP9/AV1 video
+  - Supports AAC (A_AAC), MP3 (A_MPEG/L3), FLAC (A_FLAC), AC3 (A_AC3), Opus, Vorbis, PCM audio
+  - Parses CodecPrivate into StreamInfo.extra_data so decoders get codec config (avcC, hvcC, AudioSpecificConfig)
+  - Distinguishes WebM from MKV via EBML DocType field (reports format_name as "webm" or "matroska")
+  - No muxer yet (use WebM muxer for VP8/VP9/Opus content)
 - ✅ **MP4** (ISO Base Media File Format): Demuxer + Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
   - Supports H.264/AVC (avc1), H.265/HEVC (hvc1/hev1), VP9 (vp09), AAC (mp4a), MP3 (.mp3), and Opus audio
   - Muxer: Streaming API with incremental packet writing
@@ -258,7 +265,6 @@ Build comprehensive testing infrastructure including:
   - Automatic 64-bit chunk offsets for files > 4GB
   - Demuxer: Parses moov box, builds sample table, sequential packet reading
   - Demuxer: Supports seeking by timestamp
-- MKV (Matroska) - Planned
 
 **Video Codecs** (decoders/encoders) - Priority:
 - ✅ **VP8**: Google's open video codec **IMPLEMENTED** in `rust_media_codec/src/video/vp8.rs`

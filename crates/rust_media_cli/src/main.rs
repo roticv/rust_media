@@ -1662,7 +1662,7 @@ fn open_demuxer(
 
     let demuxer: Box<dyn Demuxer> = match format {
         ContainerFormat::Mp4 => Box::new(Mp4Demuxer::new(reader)?),
-        ContainerFormat::WebM => Box::new(WebmDemuxer::open(reader)?),
+        ContainerFormat::WebM | ContainerFormat::Mkv => Box::new(WebmDemuxer::open(reader)?),
         ContainerFormat::Wav => Box::new(WavDemuxer::open(reader)?),
     };
 

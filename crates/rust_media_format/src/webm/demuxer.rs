@@ -54,7 +54,7 @@ struct VideoParams {
 }
 
 impl<R: Read + Seek> WebmDemuxer<R> {
-    /// Opens a WebM file for demuxing
+    /// Opens a WebM/MKV file for demuxing
     pub fn open(mut reader: R) -> Result<Self> {
         // Parse EBML header
         let ebml_elem = Element::read(&mut reader)?;
@@ -62,8 +62,25 @@ impl<R: Read + Seek> WebmDemuxer<R> {
             return Err(Error::InvalidData("Not a valid EBML file".to_string()));
         }
 
-        // Skip EBML header content for now
-        ebml_elem.skip(&mut reader)?;
+        // Parse EBML header to find DocType (distinguishes WebM from MKV)
+        let header_data_start = reader.stream_position()?;
+        let header_size = ebml_elem.size.unwrap_or(0);
+        let header_end = header_data_start + header_size;
+        let mut doc_type = String::from("matroska"); // default
+        while reader.stream_position()? < header_end {
+            let child = Element::read(&mut reader)?;
+            if child.id == element_id::DOC_TYPE {
+                doc_type = child.read_string(&mut reader)?;
+            } else {
+                child.skip(&mut reader)?;
+            }
+        }
+
+        let format_name = if doc_type == "webm" {
+            "webm".to_string()
+        } else {
+            "matroska".to_string()
+        };
 
         // Find Segment element
         let segment_elem = Element::read(&mut reader)?;
@@ -77,7 +94,7 @@ impl<R: Read + Seek> WebmDemuxer<R> {
             reader,
             streams: Vec::new(),
             container_info: ContainerInfo {
-                format_name: "webm".to_string(),
+                format_name,
                 duration: None,
                 bitrate: None,
                 metadata: rust_media_core::stream::Metadata::new(),
@@ -321,12 +338,23 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         };
 
         // Map codec ID to our format
+        // WebM codec IDs (always supported)
+        // MKV/Matroska codec IDs (additional codecs supported by MKV)
         let codec = match track.codec_id.as_str() {
+            // Audio
             "A_OPUS" => "opus",
             "A_VORBIS" => "vorbis",
+            "A_AAC" => "aac",
+            "A_MPEG/L3" => "mp3",
+            "A_FLAC" => "flac",
+            "A_AC3" => "ac3",
+            "A_PCM/INT/LIT" | "A_PCM/INT/BIG" => "pcm",
+            // Video
             "V_VP8" => "vp8",
             "V_VP9" => "vp9",
             "V_AV1" => "av1",
+            "V_MPEG4/ISO/AVC" => "h264",
+            "V_MPEGH/ISO/HEVC" => "hevc",
             _ => "unknown",
         };
 
@@ -335,6 +363,15 @@ impl<R: Read + Seek> WebmDemuxer<R> {
 
         if let Some(duration) = self.container_info.duration {
             stream_info = stream_info.with_duration(duration);
+        }
+
+        // CodecPrivate from MKV is the codec-specific extra data
+        // For H.264 this is the AVCDecoderConfigurationRecord (avcC)
+        // For H.265 this is the HEVCDecoderConfigurationRecord (hvcC)
+        // For AAC this is the AudioSpecificConfig
+        // For Opus this is the OpusHead (already handled separately by Opus decoder)
+        if let Some(ref cp) = track.codec_private {
+            stream_info.extra_data = cp.clone();
         }
 
         // Add audio parameters

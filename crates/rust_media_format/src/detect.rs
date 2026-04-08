@@ -15,6 +15,8 @@ pub enum ContainerFormat {
     Mp4,
     /// WebM (Matroska subset for VP8/VP9/AV1 + Opus/Vorbis)
     WebM,
+    /// MKV / Matroska (full Matroska container)
+    Mkv,
     /// WAV (RIFF WAVE)
     Wav,
 }
@@ -24,7 +26,8 @@ impl ContainerFormat {
     pub fn extensions(&self) -> &[&str] {
         match self {
             ContainerFormat::Mp4 => &["mp4", "m4a", "m4v", "mov"],
-            ContainerFormat::WebM => &["webm", "mkv"],
+            ContainerFormat::WebM => &["webm"],
+            ContainerFormat::Mkv => &["mkv"],
             ContainerFormat::Wav => &["wav"],
         }
     }
@@ -34,6 +37,7 @@ impl ContainerFormat {
         match self {
             ContainerFormat::Mp4 => "mp4",
             ContainerFormat::WebM => "webm",
+            ContainerFormat::Mkv => "mkv",
             ContainerFormat::Wav => "wav",
         }
     }
@@ -41,11 +45,12 @@ impl ContainerFormat {
 
 /// Detect container format by reading magic bytes from the start of the stream.
 ///
-/// Reads up to 12 bytes, then seeks back to the original position.
+/// Reads up to 64 bytes (enough to find the EBML DocType for Matroska/WebM
+/// distinction), then seeks back to the original position.
 /// Returns `None` if the format is not recognized.
 pub fn detect_format<R: Read + Seek>(reader: &mut R) -> Option<ContainerFormat> {
     let start = reader.stream_position().ok()?;
-    let mut buf = [0u8; 12];
+    let mut buf = [0u8; 64];
     let bytes_read = reader.read(&mut buf).ok()?;
     reader.seek(SeekFrom::Start(start)).ok()?;
 
@@ -59,7 +64,17 @@ pub fn detect_format<R: Read + Seek>(reader: &mut R) -> Option<ContainerFormat> 
     }
 
     // WebM/MKV: starts with EBML header 0x1A 0x45 0xDF 0xA3
+    // Distinguish by looking for the DocType string ("matroska" or "webm")
+    // in the EBML header (within the first ~40 bytes).
     if buf[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        let header_bytes = &buf[..bytes_read];
+        if find_subsequence(header_bytes, b"matroska").is_some() {
+            return Some(ContainerFormat::Mkv);
+        }
+        if find_subsequence(header_bytes, b"webm").is_some() {
+            return Some(ContainerFormat::WebM);
+        }
+        // Default to WebM if we can't tell — both work with the same demuxer
         return Some(ContainerFormat::WebM);
     }
 
@@ -81,13 +96,21 @@ pub fn detect_format<R: Read + Seek>(reader: &mut R) -> Option<ContainerFormat> 
     None
 }
 
+/// Find a byte subsequence in a haystack.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 /// Detect container format from a file extension string (without the dot).
 ///
 /// Returns `None` if the extension is not recognized.
 pub fn detect_format_by_extension(ext: &str) -> Option<ContainerFormat> {
     match ext.to_ascii_lowercase().as_str() {
         "mp4" | "m4a" | "m4v" | "mov" => Some(ContainerFormat::Mp4),
-        "webm" | "mkv" => Some(ContainerFormat::WebM),
+        "webm" => Some(ContainerFormat::WebM),
+        "mkv" => Some(ContainerFormat::Mkv),
         "wav" => Some(ContainerFormat::Wav),
         _ => None,
     }
@@ -127,9 +150,22 @@ mod tests {
 
     #[test]
     fn test_detect_webm() {
-        let data = vec![0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00, 0x00, 0x00];
+        // EBML header followed by "webm" doctype
+        let mut data = vec![0x1A, 0x45, 0xDF, 0xA3];
+        data.extend_from_slice(b"\x00\x00\x00\x00webm\x00\x00");
+        data.resize(64, 0);
         let mut cursor = Cursor::new(data);
         assert_eq!(detect_format(&mut cursor), Some(ContainerFormat::WebM));
+    }
+
+    #[test]
+    fn test_detect_mkv() {
+        // EBML header followed by "matroska" doctype
+        let mut data = vec![0x1A, 0x45, 0xDF, 0xA3];
+        data.extend_from_slice(b"\x00\x00\x00matroska\x00");
+        data.resize(64, 0);
+        let mut cursor = Cursor::new(data);
+        assert_eq!(detect_format(&mut cursor), Some(ContainerFormat::Mkv));
     }
 
     #[test]
@@ -154,7 +190,8 @@ mod tests {
         assert_eq!(detect_format_by_extension("mp4"), Some(ContainerFormat::Mp4));
         assert_eq!(detect_format_by_extension("MOV"), Some(ContainerFormat::Mp4));
         assert_eq!(detect_format_by_extension("webm"), Some(ContainerFormat::WebM));
-        assert_eq!(detect_format_by_extension("mkv"), Some(ContainerFormat::WebM));
+        assert_eq!(detect_format_by_extension("mkv"), Some(ContainerFormat::Mkv));
+        assert_eq!(detect_format_by_extension("MKV"), Some(ContainerFormat::Mkv));
         assert_eq!(detect_format_by_extension("wav"), Some(ContainerFormat::Wav));
         assert_eq!(detect_format_by_extension("avi"), None);
     }
@@ -175,13 +212,14 @@ mod tests {
     #[test]
     fn test_detect_combined() {
         // Magic bytes take priority over extension
-        let mut data = vec![0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00, 0x00, 0x00];
-        data.resize(12, 0);
+        let mut data = vec![0x1A, 0x45, 0xDF, 0xA3];
+        data.extend_from_slice(b"\x00\x00matroska\x00");
+        data.resize(64, 0);
         let mut cursor = Cursor::new(data);
-        // File says .mp4 but magic says WebM — magic wins
+        // File says .mp4 but magic says MKV — magic wins
         assert_eq!(
             detect(&mut cursor, Path::new("wrong.mp4")),
-            Some(ContainerFormat::WebM)
+            Some(ContainerFormat::Mkv)
         );
     }
 
