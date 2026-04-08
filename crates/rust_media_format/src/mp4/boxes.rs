@@ -84,6 +84,10 @@ pub const AVCC: u32 = fourcc(b"avcC");
 pub const VP09: u32 = fourcc(b"vp09");
 /// VP9 codec configuration
 pub const VPCC: u32 = fourcc(b"vpcC");
+/// AV1 sample entry
+pub const AV01: u32 = fourcc(b"av01");
+/// AV1 codec configuration
+pub const AV1C: u32 = fourcc(b"av1C");
 /// HEVC (H.265) sample entry
 pub const HVC1: u32 = fourcc(b"hvc1");
 /// HEVC (H.265) sample entry (alternative)

@@ -8,8 +8,8 @@
 //! - **H.264/AVC** - ✅ Decoder implemented (via rust_h264, pure Rust, MIT/Apache-2.0)
 //! - **H.264/AVC** - ✅ Decoder implemented (via VideoToolbox, macOS only) - All profiles
 //! - **H.264/AVC** - ✅ Encoder implemented (via x264, requires `gpl-x264` feature)
-//! - AV1 (planned)
-//! - H.265/HEVC (future)
+//! - **H.265/HEVC** - ✅ Decoder implemented (via VideoToolbox, requires `videotoolbox` feature)
+//! - **AV1** - ✅ Decoder implemented (via dav1d, requires libdav1d)
 //!
 //! # Audio Codecs
 //! - **PCM** (raw audio) - ✅ Implemented
@@ -38,6 +38,7 @@ pub mod video;
 pub use audio::mp3::Mp3Decoder;
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
+pub use video::av1::Av1Decoder;
 pub use video::h264::H264Decoder;
 pub use video::vp8::{Vp8Decoder, Vp8Encoder};
 pub use video::vp9::{Vp9Decoder, Vp9Encoder};

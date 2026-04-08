@@ -1848,6 +1848,9 @@ fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
         "vp9" => rust_media_codec::Vp9Decoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "av1" | "av01" => rust_media_codec::Av1Decoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
         "h264" | "avc" => {
             // On macOS with videotoolbox feature, try VideoToolbox first (hardware acceleration + all profiles)
             // Falls back to OpenH264 if VideoToolbox fails

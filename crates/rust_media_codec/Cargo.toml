@@ -24,6 +24,9 @@ vpx = { path = "../vpx" }
 rust_h264 = "0.2.0"
 # minimp3 - MP3 decoder (MIT)
 minimp3 = "0.6"
+# dav1d - AV1 decoder (MIT bindings, BSD-2-Clause libdav1d)
+# Requires system libdav1d (brew install dav1d / apt-get install libdav1d-dev)
+dav1d = "0.11"
 # GPL v2+ licensed - only included when gpl-x264 feature is enabled
 x264 = { version = "0.5", optional = true }
 # FDK-AAC - Fraunhofer FDK AAC Codec License

@@ -178,6 +178,7 @@ pub fn parse_stsd<R: Read + Seek>(reader: &mut R, size: u64) -> Result<Vec<Sampl
             AVC1 => parse_avc1_entry(reader, &entry_header)?,
             HVC1 | HEV1 => parse_hevc_entry(reader, &entry_header)?,
             VP09 => parse_vp09_entry(reader, &entry_header)?,
+            AV01 => parse_av01_entry(reader, &entry_header)?,
             OPUS => parse_opus_entry(reader, &entry_header)?,
             DOT_MP3 => parse_mp3_entry(reader, &entry_header)?,
             _ => SampleEntry::Unknown,
@@ -439,6 +440,42 @@ fn parse_vp09_entry<R: Read + Seek>(reader: &mut R, header: &BoxHeader) -> Resul
 
     Ok(SampleEntry::Video(VideoSampleEntry {
         codec: "vp9".to_string(),
+        width,
+        height,
+        extra_data,
+    }))
+}
+
+/// Parses av01 (AV1) sample entry
+fn parse_av01_entry<R: Read + Seek>(reader: &mut R, header: &BoxHeader) -> Result<SampleEntry> {
+    let entry_end = header.offset + header.size;
+
+    // Skip reserved (6 bytes) + data reference index (2 bytes)
+    reader.seek(SeekFrom::Current(8))?;
+
+    // Video sample entry fields (same layout as avc1/vp09)
+    reader.seek(SeekFrom::Current(16))?; // version, revision, vendor, temporal/spatial quality
+
+    let width = reader.read_u16::<BigEndian>()?;
+    let height = reader.read_u16::<BigEndian>()?;
+
+    // Skip rest of video sample entry
+    reader.seek(SeekFrom::Current(50))?;
+
+    // Look for av1C box (AV1CodecConfigurationRecord)
+    let mut extra_data = Vec::new();
+
+    while reader.stream_position()? < entry_end {
+        let child = read_box_header(reader)?;
+        if child.box_type == AV1C {
+            extra_data = read_box_content(reader, child.content_size() as usize)?;
+            break;
+        }
+        skip_box(reader, &child)?;
+    }
+
+    Ok(SampleEntry::Video(VideoSampleEntry {
+        codec: "av1".to_string(),
         width,
         height,
         extra_data,
