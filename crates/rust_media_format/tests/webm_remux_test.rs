@@ -60,7 +60,7 @@ fn test_webm_remux_to_file() {
     }
 
     println!("  Collected {} packets\n", packets.len());
-    assert!(packets.len() > 0);
+    assert!(!packets.is_empty());
 
     // Step 3: Write to new WebM file
     println!("Writing: {:?}", output_file);

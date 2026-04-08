@@ -1581,7 +1581,7 @@ mod tests {
         // Write video packets
         for i in 0..5 {
             let mut packet = Packet::new(vec![0u8; 1000], 0, MediaType::Video);
-            packet = packet.with_pts(i * 1).with_dts(i * 1);
+            packet = packet.with_pts(i).with_dts(i);
             if i == 0 {
                 packet = packet.with_keyframe();
             }

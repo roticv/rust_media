@@ -272,7 +272,7 @@ fn test_webm_demuxer_structure() {
 
     let file = File::open(test_file).expect("Failed to open test file");
     let reader = BufReader::new(file);
-    let mut demuxer = WebmDemuxer::open(reader).expect("Failed to open demuxer");
+    let demuxer = WebmDemuxer::open(reader).expect("Failed to open demuxer");
 
     // Verify container structure
     let container_info = demuxer.container_info().expect("Failed to get container info");

@@ -18,31 +18,47 @@
 //! Creates `/tmp/test_x264_output.mp4` - a 5-second video with audio.
 //! You can play it with: `ffplay /tmp/test_x264_output.mp4`
 
-#[cfg(feature = "gpl-x264")]
-use rust_media_codec::X264Encoder;
-#[cfg(feature = "fdk-aac")]
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use rust_media_codec::FdkAacEncoder;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
+use rust_media_codec::X264Encoder;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use rust_media_core::frame::Frame;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use rust_media_core::stream::{AudioStreamParams, StreamInfo, StreamParams, VideoStreamParams};
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use rust_media_core::types::{ColorRange, ColorSpace, MediaType, PixelFormat, SampleFormat};
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use rust_media_core::{Encoder, Muxer};
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use rust_media_format::mp4::Mp4Muxer;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use std::fs::File;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 use std::io::BufWriter;
 
 /// Video configuration
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const WIDTH: usize = 640;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const HEIGHT: usize = 480;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const FPS: u32 = 30;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const DURATION_SECS: u32 = 5;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const VIDEO_BITRATE: u64 = 1_000_000; // 1 Mbps
 
 /// Audio configuration
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const SAMPLE_RATE: u32 = 48000;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const CHANNELS: usize = 2;
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 const AUDIO_BITRATE: u64 = 128000; // 128 kbps
 
 /// Generate a YUV420P frame with a moving gradient pattern
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 fn generate_test_frame(frame_num: u32, width: usize, height: usize) -> Frame {
     // Create a new video frame
     let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
@@ -57,7 +73,7 @@ fn generate_test_frame(frame_num: u32, width: usize, height: usize) -> Frame {
                 let idx = row * width + col;
                 // Horizontal gradient that moves over time
                 let y_val = ((col + offset + row / 2) % 256) as u8;
-                y_plane[idx] = y_val.max(16).min(235); // Keep within valid Y range
+                y_plane[idx] = y_val.clamp(16, 235); // Keep within valid Y range
             }
         }
     }
@@ -71,7 +87,7 @@ fn generate_test_frame(frame_num: u32, width: usize, height: usize) -> Frame {
                 let idx = row * uv_width + col;
                 // Create a subtle color shift
                 let u_val = (128i32 + ((col as i32 - (uv_width / 2) as i32) * 50 / uv_width as i32)) as u8;
-                u_plane[idx] = u_val.max(16).min(240);
+                u_plane[idx] = u_val.clamp(16, 240);
             }
         }
     }
@@ -86,7 +102,7 @@ fn generate_test_frame(frame_num: u32, width: usize, height: usize) -> Frame {
                 let v_val = (128i32
                     + (((row + offset / 4) as i32 - (uv_height / 2) as i32) * 50 / uv_height as i32))
                     as u8;
-                v_plane[idx] = v_val.max(16).min(240);
+                v_plane[idx] = v_val.clamp(16, 240);
             }
         }
     }
@@ -96,6 +112,7 @@ fn generate_test_frame(frame_num: u32, width: usize, height: usize) -> Frame {
 
 /// Generate audio samples for one frame worth of video (1/FPS seconds)
 /// Creates a stereo sine wave tone
+#[cfg(all(feature = "gpl-x264", feature = "fdk-aac"))]
 fn generate_audio_samples(start_sample: u64, num_samples: usize, frequency: f64) -> Vec<i16> {
     let mut samples = Vec::with_capacity(num_samples * CHANNELS);
 

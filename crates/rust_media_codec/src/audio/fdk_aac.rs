@@ -177,7 +177,6 @@ pub struct FdkAacEncoder {
     sample_buffer: Vec<i16>,
     frame_size: usize,
     channels: usize,
-    sample_rate: u32,
     current_pts: i64,
     buffered_packets: Vec<Packet>,
     /// AudioSpecificConfig data for MP4 muxing
@@ -260,7 +259,6 @@ impl FdkAacEncoder {
             sample_buffer: Vec::new(),
             frame_size: AAC_FRAME_SIZE,
             channels,
-            sample_rate,
             current_pts: 0,
             buffered_packets: Vec::new(),
             audio_specific_config,

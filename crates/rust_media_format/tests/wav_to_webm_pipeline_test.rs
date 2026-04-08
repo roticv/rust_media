@@ -3,7 +3,7 @@
 //! This test validates the complete encoding pipeline from WAV PCM to WebM Opus.
 
 use rust_media_codec::{OpusEncoder, PcmDecoder};
-use rust_media_core::{Decoder, Demuxer, Encoder, MediaType, Muxer, StreamInfo, StreamParams};
+use rust_media_core::{Demuxer, Encoder, MediaType, Muxer, StreamInfo, StreamParams};
 use rust_media_format::{WavDemuxer, WavMuxer, WebmDemuxer, WebmMuxer};
 use std::fs::File;
 use std::io::{BufReader, Cursor};
@@ -33,7 +33,7 @@ fn test_wav_to_webm_encoding_pipeline() {
     println!("Step 1: Reading WAV file...");
     let file = File::open(&test_file).expect("Failed to open WAV file");
     let reader = BufReader::new(file);
-    let mut wav_demuxer = WavDemuxer::open(reader).expect("Failed to open WAV demuxer");
+    let wav_demuxer = WavDemuxer::open(reader).expect("Failed to open WAV demuxer");
 
     let wav_streams = wav_demuxer.streams().expect("Failed to get streams");
     let wav_stream = wav_streams[0].clone();
@@ -127,7 +127,7 @@ fn test_wav_to_webm_encoding_pipeline() {
     let cursor = Cursor::new(wav_data);
     let mut test_wav_demuxer = WavDemuxer::open(cursor).expect("Failed to open test WAV");
 
-    let mut pcm_decoder = PcmDecoder::new(test_wav_demuxer.streams().unwrap()[0].clone())
+    let _pcm_decoder = PcmDecoder::new(test_wav_demuxer.streams().unwrap()[0].clone())
         .expect("Failed to create PCM decoder");
 
     let mut packets_written = 0;
@@ -328,7 +328,7 @@ fn test_webm_muxer_basic_functionality() {
 
     // Read it back
     let cursor = Cursor::new(webm_data);
-    let mut demuxer = WebmDemuxer::open(cursor).expect("Failed to read back WebM");
+    let demuxer = WebmDemuxer::open(cursor).expect("Failed to read back WebM");
 
     let streams = demuxer.streams().unwrap();
     assert_eq!(streams.len(), 1);

@@ -151,7 +151,7 @@ impl Default for FrameReorderBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MediaType, PixelFormat};
+    use crate::PixelFormat;
 
     fn make_frame(pts: i64) -> Frame {
         let mut f = Frame::new_video(16, 16, PixelFormat::YUV420P);

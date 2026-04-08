@@ -74,7 +74,7 @@ fn test_webm_muxer_demuxer_roundtrip() {
     }
 
     println!("  Collected {} packets", packets.len());
-    assert!(packets.len() > 0, "Should have collected at least one packet");
+    assert!(!packets.is_empty(), "Should have collected at least one packet");
 
     // Step 3: Create new WebM file using muxer
     println!("\nCreating new WebM file with muxer...");

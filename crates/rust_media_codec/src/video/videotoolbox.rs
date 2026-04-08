@@ -82,8 +82,8 @@ impl VideoToolboxH264Decoder {
     ///
     /// # Arguments
     ///
-    /// * `stream_info` - Stream information (codec must be "h264" or "avc")
-    ///                   `extra_data` should contain AVCDecoderConfigurationRecord
+    /// * `stream_info` - Stream information (codec must be "h264" or "avc").
+    ///   `extra_data` should contain AVCDecoderConfigurationRecord
     ///
     /// # Returns
     ///
@@ -271,8 +271,11 @@ fn create_format_description(avcc_data: &[u8]) -> Result<Retained<CMVideoFormatD
     }
 }
 
+/// (SPS list, PPS list) parsed from an AVCDecoderConfigurationRecord
+type AvcParameterSets = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
 /// Parse SPS and PPS from AVCDecoderConfigurationRecord
-fn parse_avcc_parameter_sets(data: &[u8]) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+fn parse_avcc_parameter_sets(data: &[u8]) -> Result<AvcParameterSets> {
     if data.len() < 7 {
         return Err(Error::InvalidData(
             "AVCDecoderConfigurationRecord too short".to_string(),
@@ -422,7 +425,7 @@ fn create_decompression_session(
 
         let status = VTDecompressionSessionCreate(
             ptr::null(),                                     // allocator
-            format_desc as *const _ as *const CMFormatDescription,
+            format_desc as *const CMFormatDescription,
             ptr::null(),                                     // videoDecoderSpecification
             ptr::null(),                                     // destinationImageBufferAttributes
             &callback_record as *const _ as *const std::ffi::c_void,
@@ -1103,7 +1106,10 @@ impl Decoder for VideoToolboxHevcDecoder {
     }
 }
 
-// External C functions from VideoToolbox and CoreMedia
+// External C functions from VideoToolbox and CoreMedia.
+// Multiple #[link] attributes are intentional — each declares a separate
+// framework dependency. clippy::duplicated_attributes is a false positive here.
+#[allow(clippy::duplicated_attributes)]
 #[link(name = "VideoToolbox", kind = "framework")]
 #[link(name = "CoreMedia", kind = "framework")]
 #[link(name = "CoreVideo", kind = "framework")]
