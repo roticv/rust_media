@@ -680,10 +680,43 @@ fn run_transform(
                     if video_codec == "copy" {
                         return Err("scale filter requires video transcoding (cannot use with -v copy)".into());
                     }
-                    // Accept both `scale=w=640:h=480` and `scale=640:480` (positional)
-                    let (w, h) = parse_scale_dimensions(filter)
+                    // Accept both `scale=w=640:h=480` and `scale=640:480` (positional).
+                    // Also accept ffmpeg-style aspect-ratio markers: -1 (preserve)
+                    // and -2 (preserve, round to even).
+                    let (parsed_w, parsed_h) = parse_scale_dimensions(filter)
                         .map_err(|e| format!("scale filter: {}", e))?;
-                    println!("Filter: scale ({}x{}, bilinear)", w, h);
+
+                    // Resolve aspect-ratio markers using the source video dimensions.
+                    // The source dimensions reflect any earlier filter in the chain
+                    // (e.g., crop) since we've been updating them as we parse.
+                    let (src_w, src_h) = video_stream
+                        .as_ref()
+                        .and_then(|vs| {
+                            if let StreamParams::Video(ref vp) = vs.params {
+                                // If a crop filter was already parsed, use its target
+                                // dimensions as the source for scale (chain order is
+                                // crop → scale).
+                                if let Some(cf) = crop_filter.as_ref() {
+                                    Some((cf.width(), cf.height()))
+                                } else {
+                                    Some((vp.width, vp.height))
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or("scale filter: no video stream found to resolve dimensions")?;
+
+                    let (w, h) = resolve_scale_dimensions(parsed_w, parsed_h, src_w, src_h)
+                        .map_err(|e| format!("scale filter: {}", e))?;
+                    if (parsed_w, parsed_h) != (w as i32, h as i32) {
+                        println!(
+                            "Filter: scale ({}x{} → {}x{}, bilinear)",
+                            src_w, src_h, w, h
+                        );
+                    } else {
+                        println!("Filter: scale ({}x{}, bilinear)", w, h);
+                    }
                     scale_filter = Some(
                         ScaleFilter::new(w, h)
                             .map_err(|e| format!("scale filter: {}", e))?,
@@ -1899,7 +1932,14 @@ fn create_video_encoder(
 ///
 /// Accepts both ffmpeg-style positional syntax (`scale=640:480`) and named
 /// syntax (`scale=w=640:h=480` or `scale=width=640:height=480`).
-fn parse_scale_dimensions(filter: &Filter) -> Result<(usize, usize), String> {
+///
+/// Returns signed values to allow ffmpeg-style aspect-ratio markers:
+/// - `-1`: preserve aspect ratio from the other dimension (no rounding)
+/// - `-2`: preserve aspect ratio, round to nearest even value (recommended for video)
+///
+/// Use `resolve_scale_dimensions` to convert these to concrete pixel dimensions
+/// once the source frame size is known.
+fn parse_scale_dimensions(filter: &Filter) -> Result<(i32, i32), String> {
     // Named form: w=W:h=H or width=W:height=H
     if let Some(w_str) = filter
         .get_param("w")
@@ -1910,10 +1950,10 @@ fn parse_scale_dimensions(filter: &Filter) -> Result<(usize, usize), String> {
             .or_else(|| filter.get_param("height"))
             .ok_or("missing height (use h=H or height=H)")?;
         let w = w_str
-            .parse::<usize>()
+            .parse::<i32>()
             .map_err(|_| format!("invalid width: {}", w_str))?;
         let h = h_str
-            .parse::<usize>()
+            .parse::<i32>()
             .map_err(|_| format!("invalid height: {}", h_str))?;
         return Ok((w, h));
     }
@@ -1921,16 +1961,84 @@ fn parse_scale_dimensions(filter: &Filter) -> Result<(usize, usize), String> {
     // Positional form: scale=W:H (uses Filter.positional which preserves order)
     if filter.positional.len() == 2 {
         let w = filter.positional[0]
-            .parse::<usize>()
+            .parse::<i32>()
             .map_err(|_| format!("invalid width: {}", filter.positional[0]))?;
         let h = filter.positional[1]
-            .parse::<usize>()
+            .parse::<i32>()
             .map_err(|_| format!("invalid height: {}", filter.positional[1]))?;
         return Ok((w, h));
     }
 
     Err("scale filter requires width and height (e.g., scale=640:480 or scale=w=640:h=480)"
         .to_string())
+}
+
+/// Resolve `scale` dimensions, expanding ffmpeg-style aspect-ratio markers
+/// (`-1` and `-2`) into concrete pixel dimensions based on the source size.
+///
+/// - `-1`: preserve aspect ratio (may yield odd dimensions)
+/// - `-2`: preserve aspect ratio, round to nearest even value
+/// - positive integer: use as-is
+///
+/// At least one of `parsed_w` and `parsed_h` must be a positive integer.
+fn resolve_scale_dimensions(
+    parsed_w: i32,
+    parsed_h: i32,
+    src_w: usize,
+    src_h: usize,
+) -> Result<(usize, usize), String> {
+    if src_w == 0 || src_h == 0 {
+        return Err(format!("invalid source dimensions {}x{}", src_w, src_h));
+    }
+
+    let resolve = |target: i32, fixed: i32, src_a: usize, src_b: usize| -> Result<usize, String> {
+        match target {
+            n if n > 0 => Ok(n as usize),
+            -1 => {
+                // Preserve aspect ratio: target = fixed * src_a / src_b
+                if fixed <= 0 {
+                    return Err(
+                        "scale: at least one of width/height must be positive when using -1/-2"
+                            .to_string(),
+                    );
+                }
+                let computed = (fixed as i64 * src_a as i64) / src_b as i64;
+                if computed <= 0 {
+                    return Err(format!(
+                        "scale: aspect-ratio computation produced non-positive result {}",
+                        computed
+                    ));
+                }
+                Ok(computed as usize)
+            }
+            -2 => {
+                if fixed <= 0 {
+                    return Err(
+                        "scale: at least one of width/height must be positive when using -1/-2"
+                            .to_string(),
+                    );
+                }
+                let computed = (fixed as i64 * src_a as i64) / src_b as i64;
+                if computed <= 0 {
+                    return Err(format!(
+                        "scale: aspect-ratio computation produced non-positive result {}",
+                        computed
+                    ));
+                }
+                // Round to nearest even value
+                let rounded = ((computed + 1) / 2) * 2;
+                Ok(rounded.max(2) as usize)
+            }
+            _ => Err(format!(
+                "scale: invalid dimension {} (use a positive integer, -1, or -2)",
+                target
+            )),
+        }
+    };
+
+    let w = resolve(parsed_w, parsed_h, src_w, src_h)?;
+    let h = resolve(parsed_h, parsed_w, src_h, src_w)?;
+    Ok((w, h))
 }
 
 /// Parse `crop` filter parameters from a Filter spec.

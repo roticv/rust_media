@@ -483,6 +483,162 @@ fn transform_scale_filter_rejects_odd_dimensions() {
 }
 
 #[test]
+fn transform_scale_filter_neg2_height_preserves_aspect() {
+    // 640x480 source with scale=320:-2 should yield 320x240 (4:3 preserved)
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=320:-2",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 320);
+    assert_eq!(stream["height"], 240);
+}
+
+#[test]
+fn transform_scale_filter_neg2_width_preserves_aspect() {
+    // 640x480 source with scale=-2:240 should yield 320x240
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=-2:240",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 320);
+    assert_eq!(stream["height"], 240);
+}
+
+#[test]
+fn transform_scale_filter_neg2_rounds_to_even() {
+    // 640x480 source with scale=300:-2: raw height = 300*480/640 = 225,
+    // rounded up to even = 226
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=300:-2",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 300);
+    assert_eq!(stream["height"], 226);
+}
+
+#[test]
+fn transform_scale_filter_named_neg2() {
+    // Same as scale=320:-2 but using named syntax
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=w=320:h=-2",
+        ])
+        .assert()
+        .success();
+
+    let info_output = rust_media()
+        .args(["info", output_path.to_str().unwrap(), "-o", "json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let stream = &json["streams"][0];
+    assert_eq!(stream["width"], 320);
+    assert_eq!(stream["height"], 240);
+}
+
+#[test]
+fn transform_scale_filter_rejects_double_negative() {
+    // Both -2 → can't preserve aspect from nothing
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("scaled.webm");
+    let input = test_asset("test_vp9.webm");
+
+    rust_media()
+        .args([
+            "transform",
+            "-i",
+            &input,
+            output_path.to_str().unwrap(),
+            "-v",
+            "vp9",
+            "--no-audio",
+            "--vf",
+            "scale=-2:-2",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn transform_crop_filter_centered() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("cropped.webm");
