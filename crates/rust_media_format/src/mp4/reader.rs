@@ -726,3 +726,129 @@ pub fn parse_hdlr<R: Read>(reader: &mut R, size: u64) -> Result<u32> {
 
     Ok(handler_type)
 }
+
+/// Parses the bit depth from an AV1CodecConfigurationRecord (av1C box content).
+///
+/// AV1 av1C layout (per AV1 ISOBMFF spec section 2.3.1):
+/// - byte 0: marker (1 bit) | version (7 bits)
+/// - byte 1: seq_profile (3 bits) | seq_level_idx_0 (5 bits)
+/// - byte 2: seq_tier_0 (1 bit) | high_bitdepth (1 bit) | twelve_bit (1 bit)
+///   | monochrome (1 bit) | chroma_subsampling_x (1 bit)
+///   | chroma_subsampling_y (1 bit) | chroma_sample_position (2 bits)
+/// - ...
+///
+/// Bit depth is determined by `high_bitdepth` and `twelve_bit`:
+/// - !high_bitdepth          → 8 bits
+/// - high_bitdepth && !twelve_bit → 10 bits
+/// - high_bitdepth && twelve_bit  → 12 bits
+///
+/// Returns `None` if the buffer is too short.
+pub fn parse_av1c_bit_depth(data: &[u8]) -> Option<u8> {
+    if data.len() < 3 {
+        return None;
+    }
+    let byte2 = data[2];
+    let high_bitdepth = (byte2 & 0x40) != 0;
+    let twelve_bit = (byte2 & 0x20) != 0;
+    Some(match (high_bitdepth, twelve_bit) {
+        (false, _) => 8,
+        (true, false) => 10,
+        (true, true) => 12,
+    })
+}
+
+/// Parses the luma bit depth from an HEVCDecoderConfigurationRecord (hvcC box content).
+///
+/// HEVC hvcC layout (per ISO/IEC 14496-15 section 8.3.3.1.2):
+/// - byte 0:        configurationVersion = 1
+/// - byte 1:        general_profile_space (2) | general_tier_flag (1) | general_profile_idc (5)
+/// - bytes 2-5:     general_profile_compatibility_flags (32)
+/// - bytes 6-11:    general_constraint_indicator_flags (48)
+/// - byte 12:       general_level_idc (8)
+/// - bytes 13-14:   reserved (4) | min_spatial_segmentation_idc (12)
+/// - byte 15:       reserved (6) | parallelismType (2)
+/// - byte 16:       reserved (6) | chromaFormat (2)
+/// - byte 17:       reserved (5) | bitDepthLumaMinus8 (3)   ← what we want
+/// - byte 18:       reserved (5) | bitDepthChromaMinus8 (3)
+/// - bytes 19-20:   avgFrameRate (16)
+/// - byte 21:       constantFrameRate (2) | numTemporalLayers (3) | temporalIdNested (1) | lengthSizeMinusOne (2)
+/// - byte 22+:      numOfArrays + parameter set arrays
+///
+/// Returns `None` if the buffer is too short.
+pub fn parse_hvcc_bit_depth(data: &[u8]) -> Option<u8> {
+    if data.len() < 18 {
+        return None;
+    }
+    let bit_depth_luma_minus_8 = data[17] & 0x07;
+    Some(8 + bit_depth_luma_minus_8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn av1c_bit_depth_8() {
+        // Minimal av1C: marker+version | profile+level | flags
+        let data = [0x81, 0x00, 0x0C]; // byte 2 = 0b00001100 (no high_bitdepth, no twelve_bit)
+        assert_eq!(parse_av1c_bit_depth(&data), Some(8));
+    }
+
+    #[test]
+    fn av1c_bit_depth_10() {
+        // byte 2 = 0b01001100 (high_bitdepth=1, twelve_bit=0)
+        let data = [0x81, 0x00, 0x4C];
+        assert_eq!(parse_av1c_bit_depth(&data), Some(10));
+    }
+
+    #[test]
+    fn av1c_bit_depth_12() {
+        // byte 2 = 0b01101100 (high_bitdepth=1, twelve_bit=1)
+        let data = [0x81, 0x00, 0x6C];
+        assert_eq!(parse_av1c_bit_depth(&data), Some(12));
+    }
+
+    #[test]
+    fn av1c_bit_depth_too_short() {
+        assert_eq!(parse_av1c_bit_depth(&[0x81, 0x00]), None);
+    }
+
+    #[test]
+    fn hvcc_bit_depth_8() {
+        let mut data = [0u8; 23];
+        data[0] = 1; // version
+        data[17] = 0; // bitDepthLumaMinus8 = 0
+        assert_eq!(parse_hvcc_bit_depth(&data), Some(8));
+    }
+
+    #[test]
+    fn hvcc_bit_depth_10() {
+        let mut data = [0u8; 23];
+        data[0] = 1;
+        data[17] = 2; // bitDepthLumaMinus8 = 2 → 10-bit
+        assert_eq!(parse_hvcc_bit_depth(&data), Some(10));
+    }
+
+    #[test]
+    fn hvcc_bit_depth_12() {
+        let mut data = [0u8; 23];
+        data[0] = 1;
+        data[17] = 4; // bitDepthLumaMinus8 = 4 → 12-bit
+        assert_eq!(parse_hvcc_bit_depth(&data), Some(12));
+    }
+
+    #[test]
+    fn hvcc_bit_depth_ignores_reserved_bits() {
+        let mut data = [0u8; 23];
+        data[0] = 1;
+        // Top 5 bits of byte 17 are reserved — they should be masked off
+        data[17] = 0b1111_1010; // bitDepthLumaMinus8 = 2
+        assert_eq!(parse_hvcc_bit_depth(&data), Some(10));
+    }
+
+    #[test]
+    fn hvcc_bit_depth_too_short() {
+        let data = [0u8; 17]; // 17 bytes is one short of needing byte 17
+        assert_eq!(parse_hvcc_bit_depth(&data), None);
+    }
+}

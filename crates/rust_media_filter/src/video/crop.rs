@@ -94,14 +94,14 @@ impl CropFilter {
 
     /// Crop an input frame to the configured rectangle.
     ///
-    /// Returns an error if the input is not a YUV420P video frame, or if the
-    /// crop region extends beyond the source frame dimensions.
+    /// Returns an error if the input is not a YUV420P or YUV420P10LE video
+    /// frame, or if the crop region extends beyond the source frame dimensions.
     pub fn process(&self, frame: &Frame) -> Result<Frame, Box<dyn std::error::Error>> {
         let params = frame.video_params().ok_or("Not a video frame")?;
 
-        if params.format != PixelFormat::YUV420P {
+        if params.format != PixelFormat::YUV420P && params.format != PixelFormat::YUV420P10LE {
             return Err(format!(
-                "crop filter only supports YUV420P, got {:?}",
+                "crop filter only supports YUV420P and YUV420P10LE, got {:?}",
                 params.format
             )
             .into());
@@ -109,6 +109,9 @@ impl CropFilter {
 
         let src_w = params.width;
         let src_h = params.height;
+        let format = params.format;
+        // Bytes per sample: 1 for YUV420P (8-bit), 2 for YUV420P10LE (10-bit in 16 bits)
+        let bps = if format == PixelFormat::YUV420P10LE { 2 } else { 1 };
 
         if self.width > src_w || self.height > src_h {
             return Err(format!(
@@ -149,7 +152,7 @@ impl CropFilter {
             return Ok(frame.clone());
         }
 
-        let mut out = Frame::new_video(self.width, self.height, PixelFormat::YUV420P);
+        let mut out = Frame::new_video(self.width, self.height, format);
 
         // Copy Y plane (full resolution)
         {
@@ -164,6 +167,7 @@ impl CropFilter {
                 dst_y,
                 self.width,
                 self.height,
+                bps,
             );
         }
 
@@ -180,6 +184,7 @@ impl CropFilter {
                 dst_u,
                 self.width / 2,
                 self.height / 2,
+                bps,
             );
         }
 
@@ -196,6 +201,7 @@ impl CropFilter {
                 dst_v,
                 self.width / 2,
                 self.height / 2,
+                bps,
             );
         }
 
@@ -211,6 +217,10 @@ impl CropFilter {
 
 /// Copy a rectangular region from a tightly-packed source plane into a
 /// tightly-packed destination plane.
+///
+/// `src_stride`, `x_offset`, `dst_w`, `dst_h` are in **pixels** (not bytes).
+/// `bps` is the bytes per pixel (1 for 8-bit, 2 for 10-bit/16-bit).
+#[allow(clippy::too_many_arguments)]
 fn copy_plane_region(
     src: &[u8],
     src_stride: usize,
@@ -219,11 +229,14 @@ fn copy_plane_region(
     dst: &mut [u8],
     dst_w: usize,
     dst_h: usize,
+    bps: usize,
 ) {
+    let row_bytes = dst_w * bps;
     for row in 0..dst_h {
-        let src_off = (y_offset + row) * src_stride + x_offset;
-        let dst_off = row * dst_w;
-        dst[dst_off..dst_off + dst_w].copy_from_slice(&src[src_off..src_off + dst_w]);
+        let src_off = ((y_offset + row) * src_stride + x_offset) * bps;
+        let dst_off = row * row_bytes;
+        dst[dst_off..dst_off + row_bytes]
+            .copy_from_slice(&src[src_off..src_off + row_bytes]);
     }
 }
 
@@ -453,5 +466,92 @@ mod tests {
         let cropper = CropFilter::new(32, 32, Some(16), Some(16)).unwrap();
         let cropped = cropper.process(&frame).unwrap();
         assert_eq!(mean_y(&cropped), 150.0);
+    }
+
+    fn make_solid_10bit_frame(width: usize, height: usize, y10: u16) -> Frame {
+        let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P10LE);
+        let bytes = y10.to_le_bytes();
+        let y_plane = frame.plane_mut(0).unwrap();
+        for chunk in y_plane.chunks_exact_mut(2) {
+            chunk[0] = bytes[0];
+            chunk[1] = bytes[1];
+        }
+        let neutral = 512u16.to_le_bytes();
+        for plane_idx in [1, 2] {
+            let plane = frame.plane_mut(plane_idx).unwrap();
+            for chunk in plane.chunks_exact_mut(2) {
+                chunk[0] = neutral[0];
+                chunk[1] = neutral[1];
+            }
+        }
+        frame
+    }
+
+    fn read_10bit_sample(plane: &[u8], idx: usize) -> u16 {
+        u16::from_le_bytes([plane[idx * 2], plane[idx * 2 + 1]])
+    }
+
+    #[test]
+    fn crops_10bit_solid_color_preserved() {
+        let frame = make_solid_10bit_frame(64, 64, 800);
+        let cropper = CropFilter::new(32, 32, None, None).unwrap();
+        let cropped = cropper.process(&frame).unwrap();
+
+        let params = cropped.video_params().unwrap();
+        assert_eq!(params.format, PixelFormat::YUV420P10LE);
+        assert_eq!(params.width, 32);
+        assert_eq!(params.height, 32);
+
+        let y = cropped.plane(0).unwrap();
+        assert_eq!(y.len(), 32 * 32 * 2);
+        for i in 0..(32 * 32) {
+            assert_eq!(read_10bit_sample(y, i), 800);
+        }
+    }
+
+    #[test]
+    fn crops_10bit_position_encoded_extracts_correct_region() {
+        // Build a 64x64 10-bit frame where each pixel encodes its position
+        let mut frame = Frame::new_video(64, 64, PixelFormat::YUV420P10LE);
+        {
+            let y_plane = frame.plane_mut(0).unwrap();
+            for y in 0..64 {
+                for x in 0..64 {
+                    let val = ((x + y * 16) % 1024) as u16;
+                    let idx = (y * 64 + x) * 2;
+                    let bytes = val.to_le_bytes();
+                    y_plane[idx] = bytes[0];
+                    y_plane[idx + 1] = bytes[1];
+                }
+            }
+        }
+        {
+            let neutral = 512u16.to_le_bytes();
+            for plane_idx in [1, 2] {
+                let plane = frame.plane_mut(plane_idx).unwrap();
+                for chunk in plane.chunks_exact_mut(2) {
+                    chunk[0] = neutral[0];
+                    chunk[1] = neutral[1];
+                }
+            }
+        }
+
+        // Crop top-left 32x32
+        let cropper = CropFilter::new(32, 32, Some(0), Some(0)).unwrap();
+        let cropped = cropper.process(&frame).unwrap();
+        let dst_y = cropped.plane(0).unwrap();
+
+        for y in 0..32 {
+            for x in 0..32 {
+                let expected = ((x + y * 16) % 1024) as u16;
+                assert_eq!(
+                    read_10bit_sample(dst_y, y * 32 + x),
+                    expected,
+                    "mismatch at ({}, {})",
+                    x,
+                    y
+                );
+            }
+        }
     }
 }

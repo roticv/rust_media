@@ -82,15 +82,27 @@ impl Av1Decoder {
     /// Convert a dav1d Picture into a rust_media_core Frame, accounting for
     /// per-row stride.
     fn picture_to_frame(&mut self, picture: dav1d::Picture) -> Result<Frame> {
-        // Reject 10-bit / HBD content for now — codec layer is 8-bit only.
-        // dav1d reports `bit_depth()` as either 8 or 16 (storage); for HBD
-        // content the storage will be 16.
-        if picture.bit_depth() != 8 {
-            return Err(Error::Unsupported(format!(
-                "AV1 decoder only supports 8-bit content, got {}-bit",
-                picture.bit_depth()
-            )));
-        }
+        // dav1d's `bit_depth()` returns the actual bit depth (8, 10, or 12),
+        // not the storage size. 8-bit content uses 1 byte per sample; 10/12-bit
+        // content uses 2 bytes per sample (little-endian u16, lower bits significant).
+        let bit_depth = picture.bit_depth();
+        let pixel_format = match bit_depth {
+            8 => PixelFormat::YUV420P,
+            10 => PixelFormat::YUV420P10LE,
+            12 => {
+                return Err(Error::Unsupported(
+                    "12-bit AV1 (Profile 2) is not yet supported. \
+                    The codec layer and pixel format support are 8-bit/10-bit only."
+                        .to_string(),
+                ));
+            }
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "AV1 decoder: unexpected bit depth {}",
+                    other
+                )));
+            }
+        };
 
         // We only support YUV 4:2:0 (I420) for now.
         if picture.pixel_layout() != PixelLayout::I420 {
@@ -103,7 +115,7 @@ impl Av1Decoder {
         let width = picture.width() as usize;
         let height = picture.height() as usize;
 
-        let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
+        let mut frame = Frame::new_video(width, height, pixel_format);
 
         // Map dav1d's monotonic timestamp back to the source packet PTS.
         let ts = picture.timestamp();
@@ -129,7 +141,11 @@ impl Av1Decoder {
         };
         frame.set_pts(pts);
 
-        // Copy each plane, honoring stride (which may be > width for SIMD alignment).
+        // Bytes per pixel: 1 for 8-bit, 2 for 10/12-bit storage
+        let bps = if bit_depth == 8 { 1 } else { 2 };
+
+        // Copy each plane, honoring stride (which may be > width*bps for SIMD alignment).
+        // dav1d stride is in bytes; we copy `plane_width * bps` bytes per row.
         let copy_plane = |frame: &mut Frame,
                           plane_idx: usize,
                           src: &[u8],
@@ -137,14 +153,15 @@ impl Av1Decoder {
                           plane_width: usize,
                           plane_height: usize|
          -> Result<()> {
+            let row_bytes = plane_width * bps;
             let dst = frame
                 .plane_mut(plane_idx)
                 .ok_or_else(|| Error::InvalidData(format!("missing plane {}", plane_idx)))?;
             for row in 0..plane_height {
                 let src_off = row * src_stride;
-                let dst_off = row * plane_width;
-                dst[dst_off..dst_off + plane_width]
-                    .copy_from_slice(&src[src_off..src_off + plane_width]);
+                let dst_off = row * row_bytes;
+                dst[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&src[src_off..src_off + row_bytes]);
             }
             Ok(())
         };

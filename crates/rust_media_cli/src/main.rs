@@ -1448,6 +1448,8 @@ fn process_packets<M: Muxer>(
     // Reorder buffer for video frames (B-frame decode order → PTS order)
     let mut reorder_buf = FrameReorderBuffer::new();
     let mut output_bytes: u64 = 0;
+    // One-time notice when 10→8 bit conversion is auto-inserted
+    let mut bit_depth_notice_shown = false;
 
     /// Helper: encode a frame and write resulting packets to the muxer.
     /// Accumulates output bytes written into `output_bytes`.
@@ -1507,6 +1509,24 @@ fn process_packets<M: Muxer>(
                                         eprintln!("Warning: SSIM filter error: {}", e);
                                     }
                                 }
+
+                                // Auto-convert 10-bit → 8-bit if needed.
+                                // Encoders currently only accept YUV420P (8-bit),
+                                // so we downconvert any 10-bit decoded frames.
+                                let frame = if matches!(
+                                    frame.video_params().map(|p| p.format),
+                                    Some(rust_media::PixelFormat::YUV420P10LE)
+                                ) {
+                                    if !bit_depth_notice_shown {
+                                        eprintln!(
+                                            "Auto-converting video: 10-bit (YUV420P10LE) -> 8-bit (YUV420P)"
+                                        );
+                                        bit_depth_notice_shown = true;
+                                    }
+                                    rust_media_filter::video::yuv420p10le_to_yuv420p(&frame)?
+                                } else {
+                                    frame
+                                };
 
                                 // Apply crop filter (runs before scale)
                                 let frame = if let Some(cf) = crop_filter {
@@ -1584,6 +1604,16 @@ fn process_packets<M: Muxer>(
                     eprintln!("Warning: SSIM filter error during flush: {}", e);
                 }
             }
+
+            // Auto-convert 10-bit → 8-bit if needed
+            let frame = if matches!(
+                frame.video_params().map(|p| p.format),
+                Some(rust_media::PixelFormat::YUV420P10LE)
+            ) {
+                rust_media_filter::video::yuv420p10le_to_yuv420p(&frame)?
+            } else {
+                frame
+            };
 
             // Apply crop filter (runs before scale)
             let frame = if let Some(cf) = crop_filter {

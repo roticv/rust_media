@@ -365,15 +365,41 @@ impl<R: Read + Seek> Mp4Demuxer<R> {
                     )
                 }
                 SampleEntry::Video(video) => {
+                    // Try to parse the bit depth from the codec configuration
+                    // record (av1C / hvcC). Defaults to 8 if unknown or absent.
+                    let bit_depth = match video.codec.as_str() {
+                        "av1" => crate::mp4::reader::parse_av1c_bit_depth(&video.extra_data)
+                            .unwrap_or(8),
+                        "hevc" => crate::mp4::reader::parse_hvcc_bit_depth(&video.extra_data)
+                            .unwrap_or(8),
+                        _ => 8,
+                    };
+                    let pixel_format = match bit_depth {
+                        8 => PixelFormat::YUV420P,
+                        10 => PixelFormat::YUV420P10LE,
+                        12 => {
+                            return Err(rust_media_core::Error::Unsupported(format!(
+                                "12-bit video is not yet supported (codec: {}). \
+                                The codec layer and pixel format support are 8-bit/10-bit only.",
+                                video.codec
+                            )));
+                        }
+                        other => {
+                            return Err(rust_media_core::Error::Unsupported(format!(
+                                "unsupported bit depth: {} (codec: {})",
+                                other, video.codec
+                            )));
+                        }
+                    };
                     let params = VideoStreamParams {
                         width: video.width as usize,
                         height: video.height as usize,
-                        pixel_format: PixelFormat::YUV420P,
+                        pixel_format,
                         frame_rate: (30, 1), // Default, could be calculated from stts
                         color_space: rust_media_core::types::ColorSpace::BT709,
                         color_range: rust_media_core::types::ColorRange::Limited,
                         sample_aspect_ratio: (1, 1),
-                        bit_depth: 8,
+                        bit_depth,
                     };
                     (
                         video.codec.clone(),

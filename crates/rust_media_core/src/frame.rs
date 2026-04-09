@@ -508,6 +508,18 @@ mod tests {
     }
 
     #[test]
+    fn test_frame_10bit_allocation() {
+        let frame = Frame::new_video(64, 64, PixelFormat::YUV420P10LE);
+        assert_eq!(frame.num_planes(), 3);
+        // Y plane: 64 * 2 bytes/sample * 64 rows
+        assert_eq!(frame.plane(0).unwrap().len(), 64 * 2 * 64);
+        // U plane: 32 * 2 bytes/sample * 32 rows
+        assert_eq!(frame.plane(1).unwrap().len(), 32 * 2 * 32);
+        // V plane: same as U
+        assert_eq!(frame.plane(2).unwrap().len(), 32 * 2 * 32);
+    }
+
+    #[test]
     fn test_audio_params_buffer_size() {
         let params = AudioParams::new(48000, 2, SampleFormat::F32, 1024);
 
