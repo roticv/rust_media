@@ -13,8 +13,8 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 ### Default (MIT License)
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
-- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 (dav1d, rav1e/BSD-MIT)
-- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), Vorbis (libvorbis/BSD), FLAC (libflac/BSD)
+- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 decode ✅ (dav1d/BSD-2-Clause); AV1 encode (rav1e/BSD-2-Clause) planned
+- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), MP3 decode ✅ (minimp3/MIT); Vorbis (lewton/MIT), FLAC (claxon/Apache-2.0) planned
 
 ### Optional GPL Features
 
@@ -39,13 +39,14 @@ x264 = { version = "...", optional = true }
 
 | Codec | Library | License | Feature Flag | Status |
 |-------|---------|---------|--------------|--------|
-| VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
-| VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented |
-| AV1 | dav1d/rav1e | BSD/MIT | *(default)* | Planned |
+| VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit) |
+| VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit; 10-bit Profile 2 planned) |
+| AV1 (decode) | dav1d | BSD-2-Clause | *(default)* | ✅ Implemented (Main + Main 10, 8-bit + 10-bit) |
+| AV1 (encode) | rav1e | BSD-2-Clause | *(default)* | Planned |
 | H.264 (decode) | rust_h264 | MIT/Apache-2.0 | *(default)* | ✅ Implemented (Baseline, Main, High) |
 | H.264 (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (all profiles, macOS) |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
-| H.265/HEVC (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (macOS, all profiles) |
+| H.265/HEVC (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (macOS, all profiles, 8-bit + 10-bit Main 10) |
 | H.265/HEVC (encode) | x265 | **GPL v2+** | `gpl-x265` | Future |
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
 | MP3 (decode) | minimp3 | MIT | *(default)* | ✅ Implemented |
@@ -97,11 +98,11 @@ rust_media/
 │   │   └── MP4 demuxer/muxer ✅
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode), AV1 (planned)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode, 8/10-bit), AV1 ✅ (dav1d decode, 8/10-bit; rav1e encode planned)
 │   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations
-│   │   ├── Video: scale ✅ (bilinear), crop ✅, SSIM ✅; overlay, rotate (planned)
+│   │   ├── Video: scale ✅ (bilinear, 8-bit + 10-bit), crop ✅ (8-bit + 10-bit), SSIM ✅, format ✅ (10→8 bit); overlay, rotate (planned)
 │   │   ├── Audio: resample ✅ (sinc/rubato), volume ✅; mix (planned)
 │   │   └── Filter graph parsing (FFmpeg-like syntax, named + positional) ✅
 │   │
@@ -306,7 +307,7 @@ Implement Packet and Frame abstractions with support for various media types. Th
     - Build with: `cargo build --features gpl-x264`
 - ✅ **VP9**: Google's successor to VP8 **IMPLEMENTED** in `rust_media_codec/src/video/vp9.rs`
   - Uses libvpx via vpx-rs bindings (version 0.2.1)
-  - Decoder: Fully functional with YUV420P (I420) output, 16-bit support planned
+  - Decoder: Fully functional with YUV420P (I420) output, 10-bit Profile 2 planned
   - Encoder: Functional with limited configuration options (similar limitations to VP8)
   - 30-50% better compression than VP8 at same quality
   - Tile-based encoding for better parallelization
@@ -318,11 +319,26 @@ Implement Packet and Frame abstractions with support for various media types. Th
     - Hardware accelerated on Apple Silicon
     - Supports Main, Main 10 (10-bit/HDR), and Main Still Picture profiles
     - Parses HEVCDecoderConfigurationRecord (hvcC) from MP4
-    - YUV420P output (NV12 internally, converted to I420)
+    - 8-bit output: YUV420P (NV12 internally, deinterleaved to I420)
+    - 10-bit output: YUV420P10LE (P010 internally via the documented `'x420'`
+      pixel format, explicitly requested via `kCVPixelBufferPixelFormatTypeKey`
+      in the destination buffer attributes — VideoToolbox otherwise picks the
+      undocumented `'p420'` internal format which has no public layout spec)
     - No software fallback available (macOS only)
-- **AV1** (planned)
-  - Uses dav1d (decoder) and rav1e (encoder) - BSD/MIT licensed
-  - Modern codec with best compression, royalty-free
+- ✅ **AV1** (decoder) **IMPLEMENTED** in `rust_media_codec/src/video/av1.rs`
+  - Uses dav1d via the `dav1d` crate (BSD-2-Clause, default build)
+  - Requires libdav1d (`brew install dav1d` / `apt-get install libdav1d-dev`)
+  - Supports Main Profile (8-bit) → YUV420P and Main 10 (10-bit) → YUV420P10LE
+  - 12-bit (Profile 2) is rejected with an explicit unimplemented error
+  - 4:2:0 only — 4:2:2 / 4:4:4 returns Unsupported
+  - Bit depth read from `picture.bit_depth()` (returns the actual bit depth
+    8/10/12, **not** the storage size — easy thing to misread in the docs)
+  - PTS round-tripped through dav1d's `timestamp` field via a small monotonic
+    counter map, since dav1d doesn't preserve the original PTS otherwise
+- 📋 **AV1 encoder (rav1e)** — planned. Pure-Rust, BSD-2-Clause, supports 10-bit
+  natively. Would close the loop on 10-bit (currently any 10-bit input is
+  forced down to 8-bit at the encoder boundary because no default-build
+  encoder supports 10-bit).
 
 **Audio Codecs** (decoders/encoders) - Priority:
 - ✅ **PCM** (Pulse Code Modulation): Raw uncompressed audio - fundamental for all audio processing. **IMPLEMENTED** in `rust_media_codec/src/audio/pcm.rs`
@@ -352,11 +368,32 @@ Implement Packet and Frame abstractions with support for various media types. Th
 - **Vorbis**: Open audio codec (used in WebM)
 - **FLAC**: Lossless audio codec
 
-#### 4. Color Space Handling 🚧 PLANNED
-Support for color conversions and bit-depth transformations:
-- 8-bit ↔ 10-bit conversions
-- YUV ↔ RGB conversions
-- Color space metadata handling
+#### 4. Color Space and Bit Depth Handling 🚧 IN PROGRESS
+
+**Bit depth — implemented**:
+- ✅ `YUV420P` (8-bit) and `YUV420P10LE` (10-bit, value in lower 10 bits of LE u16)
+- ✅ Bit depth parsed from codec config records: `av1C` (AV1) and `hvcC` (HEVC).
+  Stored in `VideoStreamParams.bit_depth` and reflected in the `info` command.
+- ✅ Decoders: dav1d (AV1) and VideoToolbox (HEVC) emit `YUV420P10LE` for
+  10-bit content. dav1d returns the actual bit depth from `picture.bit_depth()`;
+  VideoToolbox is forced into the documented `'x420'` (P010) format via
+  `kCVPixelBufferPixelFormatTypeKey` and converted MSB→LSB inline.
+- ✅ Filters: `scale` and `crop` have 8-bit and 10-bit code paths. The `format`
+  filter (`rust_media_filter::video::yuv420p10le_to_yuv420p`) implements
+  10→8 bit downconversion (right-shift by 2).
+- ✅ CLI auto-conversion: when an 8-bit-only encoder receives a `YUV420P10LE`
+  frame, the CLI emits a one-time stderr notice and downconverts.
+- 📋 12-bit (Profile 2) — explicitly rejected with `Error::Unsupported` at
+  every layer (not silently fallback).
+
+**Color metadata — partial**:
+- ✅ `ColorSpace`, `ColorRange`, `sample_aspect_ratio` fields exist on
+  `VideoStreamParams` and `Frame`
+- 📋 HDR metadata (mastering display, content light level) — not yet parsed
+  from HEVC SEI; not yet preserved through MP4 mux
+- 📋 YUV ↔ RGB conversion filter
+- 📋 VUI parameters (color primaries, transfer characteristics, matrix
+  coefficients) — not yet parsed from SPS / hvcC
 
 #### 5. Filter Graph System 🚧 IN PROGRESS
 Build a flexible filtering system that:
@@ -371,10 +408,12 @@ Build a flexible filtering system that:
 - **Filter graph parsing**: FFmpeg-like syntax (`filter_name=param1=value1:param2=value2`, comma-separated chains). Supports both named and positional arguments.
 - **aresample**: Audio resampling via sinc interpolation (rubato, Kaiser-windowed polyphase filter)
 - **volume**: Audio volume/gain adjustment (linear factor or dB, e.g., `volume=0.5`, `volume=6dB`)
-- **scale**: Bilinear video scaling. Syntax: `scale=W:H` or `scale=w=W:h=H`. Requires even dimensions for YUV420P chroma alignment.
-- **crop**: Video cropping. Syntax: `crop=W:H` (centered), `crop=W:H:X:Y` (positional with offset), or `crop=w=W:h=H:x=X:y=Y` (named). Requires even dimensions and offsets.
+- **scale**: Bilinear video scaling, 8-bit and 10-bit. Syntax: `scale=W:H`, `scale=w=W:h=H`, plus FFmpeg-style aspect-ratio markers `scale=W:-1` (preserve aspect, round to even) and `scale=W:-2` (round dimension to nearest even). Requires even dimensions for YUV420 chroma alignment.
+- **crop**: Video cropping, 8-bit and 10-bit. Syntax: `crop=W:H` (centered), `crop=W:H:X:Y` (positional with offset), or `crop=w=W:h=H:x=X:y=Y` (named). Requires even dimensions and offsets.
 - **ssim**: SSIM quality comparison between two video streams
+- **format conversion**: `yuv420p10le_to_yuv420p()` helper in `rust_media_filter::video::format` for 10→8 bit downconversion (right-shift by 2)
 - **Auto-resample**: Automatically resamples when encoder requires a different sample rate (e.g., MP3 44100 Hz → Opus 48000 Hz)
+- **Auto 10→8 bit conversion**: CLI downconverts `YUV420P10LE` frames to `YUV420P` when feeding an 8-bit-only encoder, with a one-time stderr notice
 - **Format detection**: Magic bytes detection with file extension fallback (`rust_media_format::detect`)
 - CLI integration via `--af` (audio filters) and `--vf` (video filters)
 - **Filter pipeline order**: For video, the chain is `decode → SSIM → crop → scale → encode`, so chained filters like `--vf "crop=320:240,scale=160:120"` produce a final 160x120 output.
