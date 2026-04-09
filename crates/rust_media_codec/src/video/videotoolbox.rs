@@ -33,11 +33,12 @@
 //! ```
 
 use objc2::rc::Retained;
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime,
     CMTimeFlags, CMVideoFormatDescription,
 };
-use objc2_core_video::CVPixelBuffer;
+use objc2_core_video::{kCVPixelBufferPixelFormatTypeKey, CVPixelBuffer};
 use objc2_video_toolbox::VTDecompressionSession;
 use rust_media_core::{
     Decoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
@@ -140,12 +141,14 @@ impl VideoToolboxH264Decoder {
         let format_desc = create_format_description(&self.stream_info.extra_data)?;
         self.format_description = Some(format_desc.clone());
 
-        // Create decompression session with callback
+        // H.264 decoder always outputs 8-bit (NV12) for now. High 10 profile
+        // is rare and not part of the current 10-bit story.
         let (session, ctx) = create_decompression_session(
             &format_desc,
             self.buffered_frames.clone(),
             self.width,
             self.height,
+            None,
         )?;
         self.session = Some(session);
         self.callback_context = Some(ctx);
@@ -400,12 +403,18 @@ struct VTDecompressionOutputCallbackRecord {
     decompressionOutputRefCon: *mut std::ffi::c_void,
 }
 
-/// Create a VTDecompressionSession with proper output callback
+/// Create a VTDecompressionSession with proper output callback.
+///
+/// `output_pixel_format`, when set, forces VideoToolbox to deliver pixel buffers
+/// in that exact format via `kCVPixelBufferPixelFormatTypeKey`. We use this to
+/// pin 10-bit HEVC output to the documented `'x420'` (P010) format instead of
+/// whatever undocumented internal format VideoToolbox might otherwise pick.
 fn create_decompression_session(
     format_desc: &CMVideoFormatDescription,
     output_frames: Arc<Mutex<VecDeque<Frame>>>,
     width: usize,
     height: usize,
+    output_pixel_format: Option<u32>,
 ) -> Result<(Retained<VTDecompressionSession>, Box<DecompressionContext>)> {
     unsafe {
         let mut session: *mut VTDecompressionSession = ptr::null_mut();
@@ -423,11 +432,29 @@ fn create_decompression_session(
             decompressionOutputRefCon: &*ctx as *const _ as *mut std::ffi::c_void,
         };
 
+        // Build destination image buffer attributes if a pixel format is requested.
+        // The CFDictionary (and the CFNumber it borrows) must outlive the call
+        // to VTDecompressionSessionCreate.
+        let fmt_number = output_pixel_format.map(|fmt| CFNumber::new_i32(fmt as i32));
+        let dest_attrs = fmt_number.as_ref().map(|num| {
+            let key: &objc2_core_foundation::CFType = kCVPixelBufferPixelFormatTypeKey;
+            let value: &objc2_core_foundation::CFType = num;
+            CFDictionary::<objc2_core_foundation::CFType, objc2_core_foundation::CFType>::from_slices(
+                &[key],
+                &[value],
+            )
+        });
+
+        let dest_attrs_ptr: *const std::ffi::c_void = match &dest_attrs {
+            Some(d) => CFRetained::as_ptr(d).as_ptr() as *const std::ffi::c_void,
+            None => ptr::null(),
+        };
+
         let status = VTDecompressionSessionCreate(
             ptr::null(),                                     // allocator
             format_desc as *const CMFormatDescription,
             ptr::null(),                                     // videoDecoderSpecification
-            ptr::null(),                                     // destinationImageBufferAttributes
+            dest_attrs_ptr,                                  // destinationImageBufferAttributes
             &callback_record as *const _ as *const std::ffi::c_void,
             &mut session,
         );
@@ -526,6 +553,16 @@ fn create_sample_buffer_from_block_buffer(
     }
 }
 
+// CVPixelBuffer pixel format codes (FourCC).
+//
+// Each constant corresponds to a `kCVPixelFormatType_*` value from CoreVideo.
+// VideoToolbox picks one of these based on the source bit depth and our
+// (currently empty) destination buffer attributes.
+const PF_420V: u32 = 0x34323076; // '420v' — NV12, 8-bit, video range
+const PF_420F: u32 = 0x34323066; // '420f' — I420, 8-bit, full range
+const PF_X420: u32 = 0x78343230; // 'x420' — P010, 10-bit MSB-aligned, video range
+const PF_XF20: u32 = 0x78663230; // 'xf20' — P010, 10-bit MSB-aligned, full range
+
 /// Convert CVPixelBuffer to Frame
 fn pixel_buffer_to_frame(
     pixel_buffer: &CVPixelBuffer,
@@ -555,103 +592,224 @@ fn pixel_buffer_to_frame(
             );
         }
 
-        let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
+        // Choose output PixelFormat based on the source pixel buffer format.
+        let output_format = match pixel_format {
+            PF_420V | PF_420F => PixelFormat::YUV420P,
+            PF_X420 | PF_XF20 => PixelFormat::YUV420P10LE,
+            other => {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer as *const _ as *mut _, 1);
+                return Err(Error::Unsupported(format!(
+                    "Unsupported pixel format: 0x{:08x}",
+                    other
+                )));
+            }
+        };
+
+        let mut frame = Frame::new_video(width, height, output_format);
         frame.set_pts(pts);
 
-        // Handle different pixel formats
-        // VideoToolbox typically outputs NV12 (420v) or BGRA
-        if pixel_format == 0x34323076 {
-            // '420v' = NV12
-            // NV12 has Y plane and interleaved UV plane
-            let y_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 0);
-            let uv_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 1);
-            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 0);
-            let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 1);
-
-            // Copy Y plane
-            if let Some(y_frame_plane) = frame.plane_mut(0) {
-                for row in 0..height {
-                    let src = y_plane.add(row * y_stride);
-                    let dst_start = row * width;
-                    std::ptr::copy_nonoverlapping(src as *const u8, y_frame_plane[dst_start..].as_mut_ptr(), width);
-                }
+        let result = match pixel_format {
+            PF_420V => convert_nv12_to_yuv420p(pixel_buffer, &mut frame, width, height),
+            PF_420F => convert_i420_to_yuv420p(pixel_buffer, &mut frame, width, height),
+            PF_X420 | PF_XF20 => {
+                convert_p010_to_yuv420p10le(pixel_buffer, &mut frame, width, height)
             }
+            _ => unreachable!("format dispatch handled above"),
+        };
 
-            // Convert NV12 interleaved UV to planar U and V
-            let uv_height = height / 2;
-            let uv_width = width / 2;
-
-            // First, collect UV data into separate buffers to avoid double mutable borrow
-            let mut u_data = vec![0u8; uv_width * uv_height];
-            let mut v_data = vec![0u8; uv_width * uv_height];
-
-            for row in 0..uv_height {
-                let src_row = uv_plane.add(row * uv_stride) as *const u8;
-                for col in 0..uv_width {
-                    let idx = row * uv_width + col;
-                    // NV12: UVUVUV...
-                    u_data[idx] = *src_row.add(col * 2);
-                    v_data[idx] = *src_row.add(col * 2 + 1);
-                }
-            }
-
-            // Copy to frame planes
-            if let Some(u_plane_dst) = frame.plane_mut(1) {
-                u_plane_dst[..u_data.len()].copy_from_slice(&u_data);
-            }
-            if let Some(v_plane_dst) = frame.plane_mut(2) {
-                v_plane_dst[..v_data.len()].copy_from_slice(&v_data);
-            }
-        } else if pixel_format == 0x34323066 {
-            // '420f' = I420 (planar YUV420)
-            let y_plane_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 0);
-            let u_plane_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 1);
-            let v_plane_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 2);
-            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 0);
-            let u_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 1);
-            let v_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 2);
-
-            // Copy Y plane
-            if let Some(y_frame_plane) = frame.plane_mut(0) {
-                for row in 0..height {
-                    let src = y_plane_ptr.add(row * y_stride);
-                    let dst_start = row * width;
-                    std::ptr::copy_nonoverlapping(src as *const u8, y_frame_plane[dst_start..].as_mut_ptr(), width);
-                }
-            }
-
-            // Copy U plane
-            let uv_height = height / 2;
-            let uv_width = width / 2;
-            if let Some(u_frame_plane) = frame.plane_mut(1) {
-                for row in 0..uv_height {
-                    let src = u_plane_ptr.add(row * u_stride);
-                    let dst_start = row * uv_width;
-                    std::ptr::copy_nonoverlapping(src as *const u8, u_frame_plane[dst_start..].as_mut_ptr(), uv_width);
-                }
-            }
-
-            // Copy V plane
-            if let Some(v_frame_plane) = frame.plane_mut(2) {
-                for row in 0..uv_height {
-                    let src = v_plane_ptr.add(row * v_stride);
-                    let dst_start = row * uv_width;
-                    std::ptr::copy_nonoverlapping(src as *const u8, v_frame_plane[dst_start..].as_mut_ptr(), uv_width);
-                }
-            }
-        } else {
-            CVPixelBufferUnlockBaseAddress(pixel_buffer as *const _ as *mut _, 1);
-            return Err(Error::Unsupported(format!(
-                "Unsupported pixel format: 0x{:08x}",
-                pixel_format
-            )));
-        }
-
-        // Unlock the pixel buffer
+        // Always unlock, even on conversion failure
         CVPixelBufferUnlockBaseAddress(pixel_buffer as *const _ as *mut _, 1);
+        result?;
 
         Ok(frame)
     }
+}
+
+/// NV12 (8-bit bi-planar Y + interleaved UV) → YUV420P (planar I420).
+unsafe fn convert_nv12_to_yuv420p(
+    pixel_buffer: &CVPixelBuffer,
+    frame: &mut Frame,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    let y_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 0);
+    let uv_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 1);
+    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 0);
+    let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 1);
+
+    // Copy Y plane
+    if let Some(y_frame_plane) = frame.plane_mut(0) {
+        for row in 0..height {
+            let src = y_plane.add(row * y_stride);
+            let dst_start = row * width;
+            std::ptr::copy_nonoverlapping(
+                src as *const u8,
+                y_frame_plane[dst_start..].as_mut_ptr(),
+                width,
+            );
+        }
+    }
+
+    // Deinterleave UV → planar U, V
+    let uv_height = height / 2;
+    let uv_width = width / 2;
+
+    let mut u_data = vec![0u8; uv_width * uv_height];
+    let mut v_data = vec![0u8; uv_width * uv_height];
+
+    for row in 0..uv_height {
+        let src_row = uv_plane.add(row * uv_stride) as *const u8;
+        for col in 0..uv_width {
+            let idx = row * uv_width + col;
+            u_data[idx] = *src_row.add(col * 2);
+            v_data[idx] = *src_row.add(col * 2 + 1);
+        }
+    }
+
+    if let Some(u_plane_dst) = frame.plane_mut(1) {
+        u_plane_dst[..u_data.len()].copy_from_slice(&u_data);
+    }
+    if let Some(v_plane_dst) = frame.plane_mut(2) {
+        v_plane_dst[..v_data.len()].copy_from_slice(&v_data);
+    }
+
+    Ok(())
+}
+
+/// I420 (8-bit planar Y, U, V) → YUV420P (already the same layout, just copy).
+unsafe fn convert_i420_to_yuv420p(
+    pixel_buffer: &CVPixelBuffer,
+    frame: &mut Frame,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    let y_plane_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 0);
+    let u_plane_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 1);
+    let v_plane_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 2);
+    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 0);
+    let u_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 1);
+    let v_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 2);
+
+    if let Some(y_frame_plane) = frame.plane_mut(0) {
+        for row in 0..height {
+            let src = y_plane_ptr.add(row * y_stride);
+            let dst_start = row * width;
+            std::ptr::copy_nonoverlapping(
+                src as *const u8,
+                y_frame_plane[dst_start..].as_mut_ptr(),
+                width,
+            );
+        }
+    }
+
+    let uv_height = height / 2;
+    let uv_width = width / 2;
+    if let Some(u_frame_plane) = frame.plane_mut(1) {
+        for row in 0..uv_height {
+            let src = u_plane_ptr.add(row * u_stride);
+            let dst_start = row * uv_width;
+            std::ptr::copy_nonoverlapping(
+                src as *const u8,
+                u_frame_plane[dst_start..].as_mut_ptr(),
+                uv_width,
+            );
+        }
+    }
+
+    if let Some(v_frame_plane) = frame.plane_mut(2) {
+        for row in 0..uv_height {
+            let src = v_plane_ptr.add(row * v_stride);
+            let dst_start = row * uv_width;
+            std::ptr::copy_nonoverlapping(
+                src as *const u8,
+                v_frame_plane[dst_start..].as_mut_ptr(),
+                uv_width,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// P010 (10-bit bi-planar, MSB-aligned) → YUV420P10LE (planar, value in LSBs).
+///
+/// P010 layout:
+/// - Plane 0 (Y): one u16 per luma sample
+/// - Plane 1 (UV): two u16s per chroma site, interleaved (U, V)
+///
+/// Each 16-bit container stores the 10-bit value in the **upper 10 bits**
+/// (i.e. shifted left by 6). Our `YUV420P10LE` format expects the 10-bit
+/// value in the lower 10 bits, so we right-shift by 6 and clamp to 10 bits.
+unsafe fn convert_p010_to_yuv420p10le(
+    pixel_buffer: &CVPixelBuffer,
+    frame: &mut Frame,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    let y_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 0);
+    let uv_plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer as *const _ as *mut _, 1);
+    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 0);
+    let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer as *const _ as *mut _, 1);
+
+    // --- Y plane ---
+    if let Some(y_frame_plane) = frame.plane_mut(0) {
+        for row in 0..height {
+            let src_row = y_plane.add(row * y_stride) as *const u8;
+            let dst_off = row * width * 2;
+            for col in 0..width {
+                // Read u16 from source (P010 is little-endian on Apple platforms)
+                let lo = *src_row.add(col * 2);
+                let hi = *src_row.add(col * 2 + 1);
+                let p010 = u16::from_le_bytes([lo, hi]);
+                // 10-bit value lives in the upper 10 bits → shift right by 6
+                let val10 = (p010 >> 6) & 0x3FF;
+                // Write little-endian u16 into the YUV420P10LE plane
+                let bytes = val10.to_le_bytes();
+                y_frame_plane[dst_off + col * 2] = bytes[0];
+                y_frame_plane[dst_off + col * 2 + 1] = bytes[1];
+            }
+        }
+    }
+
+    // --- UV plane → split into planar U, V ---
+    let uv_height = height / 2;
+    let uv_width = width / 2;
+
+    // Stage into temporary buffers to avoid borrowing two frame planes at once.
+    let mut u_data = vec![0u8; uv_width * uv_height * 2];
+    let mut v_data = vec![0u8; uv_width * uv_height * 2];
+
+    for row in 0..uv_height {
+        let src_row = uv_plane.add(row * uv_stride) as *const u8;
+        for col in 0..uv_width {
+            // P010 UV plane: each chroma sample pair is 4 bytes (u16 U, u16 V)
+            let pair = src_row.add(col * 4);
+            let u_lo = *pair;
+            let u_hi = *pair.add(1);
+            let v_lo = *pair.add(2);
+            let v_hi = *pair.add(3);
+
+            let u10 = (u16::from_le_bytes([u_lo, u_hi]) >> 6) & 0x3FF;
+            let v10 = (u16::from_le_bytes([v_lo, v_hi]) >> 6) & 0x3FF;
+
+            let dst_idx = (row * uv_width + col) * 2;
+            let u_bytes = u10.to_le_bytes();
+            let v_bytes = v10.to_le_bytes();
+            u_data[dst_idx] = u_bytes[0];
+            u_data[dst_idx + 1] = u_bytes[1];
+            v_data[dst_idx] = v_bytes[0];
+            v_data[dst_idx + 1] = v_bytes[1];
+        }
+    }
+
+    if let Some(u_plane_dst) = frame.plane_mut(1) {
+        u_plane_dst[..u_data.len()].copy_from_slice(&u_data);
+    }
+    if let Some(v_plane_dst) = frame.plane_mut(2) {
+        v_plane_dst[..v_data.len()].copy_from_slice(&v_data);
+    }
+
+    Ok(())
 }
 
 impl Decoder for VideoToolboxH264Decoder {
@@ -854,11 +1012,22 @@ impl VideoToolboxHevcDecoder {
         let format_desc = create_hevc_format_description(&self.stream_info.extra_data)?;
         self.format_description = Some(format_desc.clone());
 
+        // For 10-bit HEVC, explicitly request the documented 'x420' (P010)
+        // pixel format. Otherwise VideoToolbox may pick an undocumented
+        // internal format like 'p420' that we don't know how to interpret.
+        let bit_depth = parse_hvcc_bit_depth(&self.stream_info.extra_data).unwrap_or(8);
+        let output_pixel_format = if bit_depth >= 10 {
+            Some(PF_X420) // 'x420' = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        } else {
+            None
+        };
+
         let (session, ctx) = create_decompression_session(
             &format_desc,
             self.buffered_frames.clone(),
             self.width,
             self.height,
+            output_pixel_format,
         )?;
         self.session = Some(session);
         self.callback_context = Some(ctx);
@@ -949,6 +1118,19 @@ fn create_hevc_format_description(hvcc_data: &[u8]) -> Result<Retained<CMVideoFo
 
         Ok(Retained::from_raw(format_desc as *mut CMVideoFormatDescription).unwrap())
     }
+}
+
+/// Extract `bit_depth_luma_minus_8` from an HEVCDecoderConfigurationRecord (hvcC).
+///
+/// Per ISO/IEC 14496-15, byte 17 of the hvcC record contains
+/// `reserved (5 bits) | bitDepthLumaMinus8 (3 bits)`. Returns the actual luma
+/// bit depth (8, 10, or 12), or `None` if the record is too short.
+fn parse_hvcc_bit_depth(data: &[u8]) -> Option<u8> {
+    if data.len() < 18 {
+        return None;
+    }
+    let bit_depth_luma_minus_8 = data[17] & 0x07;
+    Some(8 + bit_depth_luma_minus_8)
 }
 
 /// Parse VPS, SPS, and PPS from HEVCDecoderConfigurationRecord
