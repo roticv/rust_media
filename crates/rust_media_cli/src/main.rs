@@ -29,6 +29,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// `Transform` carries many user-facing options (clap arg fields), which
+// makes it legitimately larger than `Info`. Boxing the fields would push
+// indirection through every match arm for no real gain.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Analyze media files and display information (similar to ffprobe)
     Info {
@@ -82,6 +86,51 @@ enum Commands {
         /// Audio bitrate in kbps (e.g., 128 for 128 kbps)
         #[arg(long, default_value = "128")]
         audio_bitrate: u64,
+
+        // ----- Codec tuning (ffmpeg-compatible names) -----
+        // These apply to AV1 (rav1e) today. Other encoders silently ignore
+        // them until their builders gain matching options.
+        /// GOP size — maximum frames between keyframes (ffmpeg -g).
+        ///
+        /// AV1: defaults to 240. Larger values improve compression at the
+        /// cost of seek granularity.
+        #[arg(short = 'g', long = "gop-size", visible_alias = "g")]
+        gop_size: Option<u64>,
+
+        /// Minimum frames between keyframes (ffmpeg -keyint_min).
+        ///
+        /// AV1: defaults to 12.
+        #[arg(long = "keyint-min", visible_alias = "keyint_min")]
+        keyint_min: Option<u64>,
+
+        /// Constant-quality quantizer for AV1 (ffmpeg librav1e -qp).
+        ///
+        /// Range 0-255 — lower is higher quality. Setting `--qp` puts the
+        /// encoder into constant-quality mode and overrides --video-bitrate.
+        /// rav1e's default is 100.
+        #[arg(long = "qp")]
+        qp: Option<u8>,
+
+        /// Speed preset for AV1 (ffmpeg librav1e -speed).
+        ///
+        /// Range 0-10 — lower is slower and higher quality. rav1e's default
+        /// is 6 (balanced). Use 8-10 for fast previews.
+        #[arg(long = "speed")]
+        speed: Option<u8>,
+
+        /// Number of tile columns (ffmpeg -tile-columns). Must be a power of two.
+        #[arg(long = "tile-columns", visible_alias = "tile_columns")]
+        tile_columns: Option<usize>,
+
+        /// Number of tile rows (ffmpeg -tile-rows). Must be a power of two.
+        #[arg(long = "tile-rows", visible_alias = "tile_rows")]
+        tile_rows: Option<usize>,
+
+        /// Total tile count for AV1 (ffmpeg librav1e -tiles).
+        ///
+        /// When set, overrides --tile-columns and --tile-rows.
+        #[arg(long = "tiles")]
+        tiles: Option<usize>,
 
         /// Select video stream by index (default: first video stream)
         #[arg(long)]
@@ -520,6 +569,13 @@ fn main() {
             audio_codec,
             video_bitrate,
             audio_bitrate,
+            gop_size,
+            keyint_min,
+            qp,
+            speed,
+            tile_columns,
+            tile_rows,
+            tiles,
             video_stream,
             audio_stream,
             no_video,
@@ -528,6 +584,15 @@ fn main() {
             video_filter,
             audio_filter,
         } => {
+            let encoder_opts = EncoderOptions {
+                gop_size,
+                keyint_min,
+                qp,
+                speed,
+                tile_columns,
+                tile_rows,
+                tiles,
+            };
             if let Err(e) = run_transform(
                 &inputs,
                 &output,
@@ -542,6 +607,7 @@ fn main() {
                 progress,
                 video_filter.as_deref(),
                 audio_filter.as_deref(),
+                &encoder_opts,
             ) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -553,6 +619,35 @@ fn main() {
 // ============================================================================
 // Transform (transcode) implementation
 // ============================================================================
+
+/// Per-codec encoder tuning options gathered from CLI flags.
+///
+/// The flag names mirror FFmpeg's so users coming from `ffmpeg` can carry
+/// muscle memory across (`-g`, `-keyint_min`, `-qp`, `-speed`, `-tile-columns`,
+/// `-tile-rows`, `-tiles`). Every field is `Option<_>` — `None` means "fall
+/// back to the codec's built-in default".
+///
+/// Each option is applied to the encoder builder if the codec supports it,
+/// and silently ignored otherwise. Today only AV1 (rav1e) consumes any of
+/// these; VP8/VP9/H.264 ignore everything until their builders gain matching
+/// knobs.
+#[derive(Debug, Default, Clone)]
+struct EncoderOptions {
+    /// `-g` — max keyframe interval in frames (rav1e `max_key_frame_interval`).
+    gop_size: Option<u64>,
+    /// `-keyint_min` — min keyframe interval in frames.
+    keyint_min: Option<u64>,
+    /// `-qp` — constant-quality quantizer (rav1e range 0..=255).
+    qp: Option<u8>,
+    /// `-speed` — speed preset (rav1e range 0..=10).
+    speed: Option<u8>,
+    /// `-tile-columns` — horizontal tile count.
+    tile_columns: Option<usize>,
+    /// `-tile-rows` — vertical tile count.
+    tile_rows: Option<usize>,
+    /// `-tiles` — total tile count (rav1e). Overrides cols/rows when set.
+    tiles: Option<usize>,
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_transform(
@@ -569,6 +664,7 @@ fn run_transform(
     progress: bool,
     video_filter: Option<&str>,
     audio_filter: Option<&str>,
+    encoder_opts: &EncoderOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = inputs.first().ok_or("At least one input file is required")?;
     let input_filename = input.to_string_lossy().to_string();
@@ -853,6 +949,7 @@ fn run_transform(
                 &crop_filter,
                 &mut audio_resampler,
                 &volume_filter,
+                encoder_opts,
             )?;
         }
         "webm" => {
@@ -872,6 +969,7 @@ fn run_transform(
                 &crop_filter,
                 &mut audio_resampler,
                 &volume_filter,
+                encoder_opts,
             )?;
         }
         "wav" => {
@@ -920,6 +1018,7 @@ fn transcode_to_mp4(
     crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
+    encoder_opts: &EncoderOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let mut writer = BufWriter::new(output_file);
@@ -962,7 +1061,7 @@ fn transcode_to_mp4(
             // YUV420P10LE, 8-bit otherwise), matching what create_video_encoder
             // will use later.
             if (out_codec == "av1" || out_codec == "av01") && video_codec != "copy" {
-                let av1c = build_av1_codec_config(vs, video_bitrate)?;
+                let av1c = build_av1_codec_config(vs, video_bitrate, encoder_opts)?;
                 out_stream.extra_data = av1c;
                 // Reflect 10-bit in the muxer's StreamParams so info readers
                 // see the correct bit_depth field.
@@ -1035,6 +1134,7 @@ fn transcode_to_mp4(
         crop_filter,
         audio_resampler,
         volume_filter,
+        encoder_opts,
     )?;
 
     muxer.write_trailer()?;
@@ -1064,6 +1164,7 @@ fn transcode_to_webm(
     crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
+    encoder_opts: &EncoderOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_file = File::create(output_filename)?;
     let writer = BufWriter::new(output_file);
@@ -1116,7 +1217,7 @@ fn transcode_to_webm(
             // header (CodecPrivate for Matroska/WebM has the same layout as
             // av1C for ISOBMFF). Also propagate the 10-bit format flag.
             if (out_codec == "av1" || out_codec == "av01") && video_codec != "copy" {
-                let av1c = build_av1_codec_config(vs, video_bitrate)?;
+                let av1c = build_av1_codec_config(vs, video_bitrate, encoder_opts)?;
                 out_stream.extra_data = av1c;
                 if let StreamParams::Video(ref mut vp) = out_stream.params {
                     if matches!(
@@ -1186,6 +1287,7 @@ fn transcode_to_webm(
         crop_filter,
         audio_resampler,
         volume_filter,
+        encoder_opts,
     )?;
 
     muxer.write_trailer()?;
@@ -1347,6 +1449,7 @@ fn run_transcode_pipeline<M: Muxer>(
     crop_filter: &Option<CropFilter>,
     audio_resampler: &mut Option<AudioResampler>,
     volume_filter: &Option<VolumeFilter>,
+    encoder_opts: &EncoderOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create decoders and encoders
     let mut video_decoder: Option<Box<dyn DecoderWrapper>> = None;
@@ -1378,7 +1481,12 @@ fn run_transcode_pipeline<M: Muxer>(
                     vp.height = sf.target_height();
                 }
             }
-            video_encoder = Some(create_video_encoder(&encoder_stream, video_codec, video_bitrate)?);
+            video_encoder = Some(create_video_encoder(
+                &encoder_stream,
+                video_codec,
+                video_bitrate,
+                encoder_opts,
+            )?);
         }
     }
 
@@ -1969,6 +2077,45 @@ fn create_decoder_for_stream(
     create_decoder(stream).ok_or_else(|| format!("No decoder available for codec: {}", stream.codec).into())
 }
 
+/// Translate the CLI's `EncoderOptions` into an `Av1EncoderConfig`.
+///
+/// Defaults are pulled from `Av1EncoderConfig::default()`. Each `Some(_)`
+/// in `opts` overrides the corresponding rav1e default. The `bitrate`
+/// argument is the value that came from `--video-bitrate` (in bps): it's
+/// applied **only if `opts.qp` is not set**, matching FFmpeg's behavior
+/// where `-qp` puts the encoder into constant-quality mode and overrides
+/// `-b:v`.
+fn build_av1_config_from_opts(bitrate: u64, opts: &EncoderOptions) -> rust_media_codec::Av1EncoderConfig {
+    let mut cfg = rust_media_codec::Av1EncoderConfig::new();
+    if let Some(speed) = opts.speed {
+        cfg = cfg.speed_preset(speed);
+    }
+    // Rate control: --qp wins over --video-bitrate (mirrors ffmpeg behavior).
+    if let Some(qp) = opts.qp {
+        cfg = cfg.quantizer(qp);
+    } else if bitrate > 0 {
+        let bps = bitrate.min(u32::MAX as u64) as u32;
+        cfg = cfg.bitrate(bps);
+    }
+    // Keyframe interval. If only one of (gop_size, keyint_min) is supplied,
+    // keep the rav1e default for the other.
+    if opts.gop_size.is_some() || opts.keyint_min.is_some() {
+        let min = opts.keyint_min.unwrap_or(12);
+        let max = opts.gop_size.unwrap_or(240);
+        cfg = cfg.key_frame_interval(min, max);
+    }
+    if let Some(n) = opts.tile_columns {
+        cfg = cfg.tile_cols(n);
+    }
+    if let Some(n) = opts.tile_rows {
+        cfg = cfg.tile_rows(n);
+    }
+    if let Some(n) = opts.tiles {
+        cfg = cfg.tiles(n);
+    }
+    cfg
+}
+
 /// Builds the AV1 sequence header (av1C / Matroska CodecPrivate) for the
 /// given input stream by spinning up a throwaway rav1e encoder.
 ///
@@ -1976,9 +2123,14 @@ fn create_decoder_for_stream(
 /// height, bit depth, chroma sampling), so we don't need to send any frames
 /// through the encoder first. The throwaway encoder is dropped immediately
 /// after — the real one is constructed later in `create_video_encoder`.
+///
+/// The throwaway encoder must be built with the **same config** as the real
+/// one (otherwise the av1C bytes won't match what gets emitted), so we accept
+/// the same `encoder_opts` here and feed it through `build_av1_config_from_opts`.
 fn build_av1_codec_config(
     input_stream: &StreamInfo,
     bitrate: u64,
+    encoder_opts: &EncoderOptions,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let (width, height, frame_rate, input_pixel_format) = match &input_stream.params {
         StreamParams::Video(p) => (p.width, p.height, p.frame_rate, p.pixel_format),
@@ -1992,9 +2144,9 @@ fn build_av1_codec_config(
         .with_frame_rate(frame_rate.0, frame_rate.1);
     let stream_info = StreamInfo::new(0, MediaType::Video, "av1".to_string())
         .with_params(StreamParams::Video(video_params))
-        .with_bitrate(bitrate)
         .with_time_base(input_stream.time_base.0, input_stream.time_base.1);
-    let encoder = rust_media_codec::Av1Encoder::new(stream_info)?;
+    let av1_config = build_av1_config_from_opts(bitrate, encoder_opts);
+    let encoder = rust_media_codec::Av1Encoder::with_config(stream_info, av1_config)?;
     Ok(encoder.codec_config())
 }
 
@@ -2002,6 +2154,7 @@ fn create_video_encoder(
     input_stream: &StreamInfo,
     codec: &str,
     bitrate: u64,
+    encoder_opts: &EncoderOptions,
 ) -> Result<Box<dyn EncoderWrapper>, Box<dyn std::error::Error>> {
     let (width, height, frame_rate, input_pixel_format) = match &input_stream.params {
         StreamParams::Video(params) => (
@@ -2044,7 +2197,14 @@ fn create_video_encoder(
             Ok(Box::new(encoder))
         }
         "av1" | "av01" => {
-            let encoder = rust_media_codec::Av1Encoder::new(stream_info)?;
+            // Use the explicit AV1 builder so the per-encoder flags
+            // (--speed, --qp, --gop-size, --keyint-min, --tiles, ...) are
+            // honored. We strip stream_info.bitrate here because the config
+            // already encodes the rate-control choice — leaving it set
+            // would just be redundant.
+            stream_info.bitrate = None;
+            let av1_config = build_av1_config_from_opts(bitrate, encoder_opts);
+            let encoder = rust_media_codec::Av1Encoder::with_config(stream_info, av1_config)?;
             Ok(Box::new(encoder))
         }
         #[cfg(feature = "gpl-x264")]
