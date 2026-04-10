@@ -22,7 +22,6 @@
 //! WebM/MKV (`V_AV1` codec ID) containers.
 
 use dav1d::{Decoder as Dav1dDecoder, Error as Dav1dError, PixelLayout, PlanarImageComponent};
-use rav1e::config::SpeedSettings;
 use rav1e::prelude::{
     ChromaSampling, Config as Rav1eConfig, Context as Rav1eContext, EncoderConfig as Rav1eEncoderConfig,
     EncoderStatus, FrameType as Rav1eFrameType, Rational,
@@ -310,6 +309,166 @@ enum Rav1eVariant {
     Ten(Rav1eContext<u16>),
 }
 
+/// Rate control mode for the AV1 encoder. Quantizer and bitrate are mutually
+/// exclusive — modeling them as an enum makes that impossible to misuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Av1RateControl {
+    /// Constant quantizer mode. Range `0..=255` where 0 is lossless and 255
+    /// is worst quality. rav1e's default is 100. There is no constant-quality
+    /// (CQ) mode in rav1e — quantizer is the closest equivalent.
+    Quantizer(u8),
+    /// Average bitrate target in bits per second. Internally clamped to
+    /// `i32::MAX` because that's what rav1e's `EncoderConfig.bitrate` accepts.
+    Bitrate(u32),
+}
+
+/// Configurable parameters for [`Av1Encoder`].
+///
+/// Build one of these with [`Av1EncoderConfig::new`] (or `default()`) and
+/// chain `.speed_preset(..)`, `.bitrate(..)`, etc. Then pass it to
+/// [`Av1Encoder::with_config`].
+///
+/// # Defaults
+///
+/// All fields default to rav1e's own defaults so that
+/// `Av1Encoder::new(stream_info)` and
+/// `Av1Encoder::with_config(stream_info, Av1EncoderConfig::default())` are
+/// equivalent (modulo `stream_info.bitrate`, which `new` honors for
+/// backwards compatibility — see [`Av1Encoder::new`]).
+///
+/// | Field | Default | Notes |
+/// |-------|---------|-------|
+/// | `speed_preset` | 6 | rav1e's balanced default. 0 = slowest/best, 10 = fastest/worst |
+/// | `rate_control` | `Quantizer(100)` | rav1e default qp |
+/// | `min_key_frame_interval` | 12 | minimum frames between keyframes |
+/// | `max_key_frame_interval` | 240 | 0 means infinite (single keyframe at start) |
+/// | `tile_cols` / `tile_rows` | 0 / 0 | 0 = let rav1e choose; values must be powers of two |
+/// | `tiles` | 0 | total tile count, overrides `tile_cols`/`tile_rows` if non-zero |
+/// | `low_latency` | false | true disables frame reordering for streaming |
+/// | `error_resilient` | false | true makes every frame independently decodable |
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rust_media_codec::video::av1::{Av1Encoder, Av1EncoderConfig, Av1RateControl};
+///
+/// let config = Av1EncoderConfig::new()
+///     .speed_preset(8)                       // faster encode
+///     .rate_control(Av1RateControl::Bitrate(2_000_000))
+///     .key_frame_interval(60, 240)           // ~2s GOP @ 30fps
+///     .tiles(4)                              // 4 tiles for parallelism
+///     .low_latency(true);
+/// let encoder = Av1Encoder::with_config(stream_info, config)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Av1EncoderConfig {
+    speed_preset: u8,
+    rate_control: Av1RateControl,
+    min_key_frame_interval: u64,
+    max_key_frame_interval: u64,
+    tile_cols: usize,
+    tile_rows: usize,
+    tiles: usize,
+    low_latency: bool,
+    error_resilient: bool,
+}
+
+impl Default for Av1EncoderConfig {
+    fn default() -> Self {
+        Self {
+            speed_preset: 6,
+            rate_control: Av1RateControl::Quantizer(100),
+            min_key_frame_interval: 12,
+            max_key_frame_interval: 240,
+            tile_cols: 0,
+            tile_rows: 0,
+            tiles: 0,
+            low_latency: false,
+            error_resilient: false,
+        }
+    }
+}
+
+impl Av1EncoderConfig {
+    /// Create a new config with rav1e defaults. Same as
+    /// [`Av1EncoderConfig::default`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the speed preset in the range `0..=10`. Lower values are slower
+    /// and produce higher quality. Values above 10 are clamped to 10.
+    pub fn speed_preset(mut self, preset: u8) -> Self {
+        self.speed_preset = preset.min(10);
+        self
+    }
+
+    /// Set the rate control mode (quantizer or bitrate). Use this directly
+    /// when you need to express the choice explicitly; otherwise the
+    /// shorthand `quantizer(..)` and `bitrate(..)` methods are usually clearer.
+    pub fn rate_control(mut self, rc: Av1RateControl) -> Self {
+        self.rate_control = rc;
+        self
+    }
+
+    /// Shorthand for `rate_control(Av1RateControl::Quantizer(q))`.
+    pub fn quantizer(self, q: u8) -> Self {
+        self.rate_control(Av1RateControl::Quantizer(q))
+    }
+
+    /// Shorthand for `rate_control(Av1RateControl::Bitrate(bps))`.
+    pub fn bitrate(self, bps: u32) -> Self {
+        self.rate_control(Av1RateControl::Bitrate(bps))
+    }
+
+    /// Set the minimum and maximum keyframe interval, in frames. A `max` of
+    /// 0 maps to "infinite" (only the first frame is a keyframe), matching
+    /// rav1e's `set_key_frame_interval` semantics.
+    pub fn key_frame_interval(mut self, min: u64, max: u64) -> Self {
+        self.min_key_frame_interval = min;
+        self.max_key_frame_interval = max;
+        self
+    }
+
+    /// Set the number of horizontal tiles. Must be a power of two; 0 lets
+    /// rav1e choose. Overridden by [`Self::tiles`] if that's also set.
+    pub fn tile_cols(mut self, n: usize) -> Self {
+        self.tile_cols = n;
+        self
+    }
+
+    /// Set the number of vertical tiles. Must be a power of two; 0 lets
+    /// rav1e choose. Overridden by [`Self::tiles`] if that's also set.
+    pub fn tile_rows(mut self, n: usize) -> Self {
+        self.tile_rows = n;
+        self
+    }
+
+    /// Set the total tile count. rav1e will split horizontally and
+    /// vertically as needed to reach this number. When non-zero this
+    /// overrides `tile_cols`/`tile_rows`.
+    pub fn tiles(mut self, total: usize) -> Self {
+        self.tiles = total;
+        self
+    }
+
+    /// Enable or disable low-latency mode. When enabled, rav1e disables
+    /// frame reordering (no B-frames in display order) to minimize end-to-end
+    /// latency. Useful for streaming and live encoding.
+    pub fn low_latency(mut self, v: bool) -> Self {
+        self.low_latency = v;
+        self
+    }
+
+    /// Enable or disable error-resilient mode. When enabled, every frame
+    /// is independently decodable, which makes recovery from packet loss
+    /// possible at the cost of compression efficiency.
+    pub fn error_resilient(mut self, v: bool) -> Self {
+        self.error_resilient = v;
+        self
+    }
+}
+
 /// AV1 video encoder using rav1e (pure-Rust, BSD-2-Clause).
 ///
 /// Supports `YUV420P` (8-bit) and `YUV420P10LE` (10-bit) input. The bit depth
@@ -318,20 +477,29 @@ enum Rav1eVariant {
 ///
 /// # Configuration
 ///
-/// Currently uses sensible defaults:
-/// - Speed preset: 6 (balanced quality/speed)
-/// - Rate control: bitrate mode if `StreamInfo.bitrate` is set, else quantizer mode
-/// - Keyframe interval: 12–240 frames (rav1e default)
-/// - 4:2:0 chroma subsampling only
+/// `Av1Encoder::new(stream_info)` uses [`Av1EncoderConfig::default`] (rav1e
+/// defaults), and additionally honors `stream_info.bitrate` for backwards
+/// compatibility — if it's set, the encoder switches into bitrate mode at
+/// that target.
 ///
-/// More fine-grained configuration (preset, tile counts, low-latency mode)
-/// can be exposed via a builder later.
+/// For more control, use [`Av1Encoder::with_config`] and build an
+/// [`Av1EncoderConfig`] yourself:
+///
+/// ```rust,ignore
+/// let config = Av1EncoderConfig::new()
+///     .speed_preset(8)
+///     .bitrate(2_000_000)
+///     .key_frame_interval(60, 240);
+/// let encoder = Av1Encoder::with_config(stream_info, config)?;
+/// ```
 ///
 /// # Codec Config Record (av1C)
 ///
-/// `container_sequence_header()` exposes the sequence header in the format
-/// expected by both ISOBMFF (MP4 av1C box) and Matroska (WebM/MKV CodecPrivate).
-/// Call it after the first packet has been received.
+/// [`Av1Encoder::codec_config`] exposes the sequence header in the format
+/// expected by both ISOBMFF (MP4 av1C box) and Matroska (WebM/MKV
+/// CodecPrivate). Unlike most encoder config records, it can be called
+/// immediately after construction — the bytes are derived from the encoder
+/// config, not from any sent frames.
 pub struct Av1Encoder {
     stream_info: StreamInfo,
     ctx: Rav1eVariant,
@@ -350,7 +518,40 @@ pub struct Av1Encoder {
 }
 
 impl Av1Encoder {
+    /// Create an encoder with rav1e defaults. For backwards compatibility,
+    /// if `stream_info.bitrate` is set this is treated as
+    /// `rate_control = Bitrate(stream_info.bitrate)`; otherwise the encoder
+    /// runs in quantizer mode at rav1e's default qp = 100.
+    ///
+    /// For finer control over speed preset, key-frame interval, tiles, etc.,
+    /// use [`Av1Encoder::with_config`] and build an [`Av1EncoderConfig`].
     pub fn new(stream_info: StreamInfo) -> Result<Self> {
+        let mut config = Av1EncoderConfig::default();
+        if let Some(bitrate_bps) = stream_info.bitrate {
+            // Promote stream_info.bitrate to a Bitrate rate_control. We cap
+            // to u32::MAX here; the inner i32::MAX clamp happens in
+            // `with_config` when applying to rav1e.
+            let bps = bitrate_bps.min(u32::MAX as u64) as u32;
+            config = config.bitrate(bps);
+        }
+        Self::with_config(stream_info, config)
+    }
+
+    /// Backwards-compatible shortcut for setting `stream_info.bitrate` and
+    /// then calling `new`. New code should prefer
+    /// `Av1Encoder::with_config(stream_info, Av1EncoderConfig::new().bitrate(..))`.
+    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
+        stream_info.bitrate = Some(bitrate);
+        Self::new(stream_info)
+    }
+
+    /// Create an encoder with an explicit configuration. This is the
+    /// preferred constructor when you need to tune anything beyond bitrate.
+    ///
+    /// Note: `config` overrides `stream_info.bitrate`. If you set
+    /// `Av1RateControl::Quantizer` in the config but `stream_info.bitrate` is
+    /// also set, the config wins and quantizer mode is used.
+    pub fn with_config(stream_info: StreamInfo, config: Av1EncoderConfig) -> Result<Self> {
         if stream_info.codec != "av1" && stream_info.codec != "av01" {
             return Err(Error::Unsupported(format!(
                 "Expected av1 codec, got {}",
@@ -388,8 +589,11 @@ impl Av1Encoder {
             ));
         }
 
-        // Build a sensible default EncoderConfig.
-        let mut enc = Rav1eEncoderConfig::with_speed_preset(6);
+        // Start from a speed-preset baseline, then layer the rest of the
+        // config on top. with_speed_preset() initializes SpeedSettings, so
+        // calling it first means we don't have to touch SpeedSettings
+        // ourselves later.
+        let mut enc = Rav1eEncoderConfig::with_speed_preset(config.speed_preset);
         enc.width = width;
         enc.height = height;
         enc.bit_depth = bit_depth;
@@ -398,13 +602,32 @@ impl Av1Encoder {
             num: stream_info.time_base.0 as u64,
             den: stream_info.time_base.1 as u64,
         };
-        // Bitrate mode if the user specified one; otherwise leave 0 (quantizer mode).
-        if let Some(bitrate_bps) = stream_info.bitrate {
-            // EncoderConfig.bitrate is i32 bits per second. Cap to i32::MAX to be safe.
-            enc.bitrate = bitrate_bps.min(i32::MAX as u64) as i32;
+
+        // Apply rate control. In rav1e, `bitrate == 0` means "use quantizer
+        // mode at the value in `quantizer`"; non-zero means bitrate mode and
+        // `quantizer` is ignored.
+        match config.rate_control {
+            Av1RateControl::Quantizer(q) => {
+                enc.bitrate = 0;
+                enc.quantizer = q as usize;
+            }
+            Av1RateControl::Bitrate(bps) => {
+                enc.bitrate = bps.min(i32::MAX as u32) as i32;
+            }
         }
-        // Sane SpeedSettings preset 6 default is already applied via with_speed_preset.
-        let _ = SpeedSettings::from_preset(6);
+
+        // Keyframe interval. set_key_frame_interval handles the special case
+        // of max == 0 → infinite, so we forward our value as-is.
+        enc.set_key_frame_interval(
+            config.min_key_frame_interval,
+            config.max_key_frame_interval,
+        );
+
+        enc.tile_cols = config.tile_cols;
+        enc.tile_rows = config.tile_rows;
+        enc.tiles = config.tiles;
+        enc.low_latency = config.low_latency;
+        enc.error_resilient = config.error_resilient;
 
         let cfg = Rav1eConfig::new().with_encoder_config(enc);
 
@@ -429,11 +652,6 @@ impl Av1Encoder {
             buffered_packets: VecDeque::new(),
             flushed: false,
         })
-    }
-
-    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
-        stream_info.bitrate = Some(bitrate);
-        Self::new(stream_info)
     }
 
     /// Returns the AV1 sequence header in the format expected by ISOBMFF
@@ -676,5 +894,122 @@ mod tests {
     fn test_av1_decoder_codec_name() {
         let decoder = Av1Decoder::new(make_stream_info()).unwrap();
         assert_eq!(decoder.codec(), "av1");
+    }
+
+    // ----- Av1EncoderConfig builder tests -----
+
+    #[test]
+    fn av1_encoder_config_default_matches_rav1e_defaults() {
+        let cfg = Av1EncoderConfig::default();
+        assert_eq!(cfg.speed_preset, 6);
+        assert_eq!(cfg.rate_control, Av1RateControl::Quantizer(100));
+        assert_eq!(cfg.min_key_frame_interval, 12);
+        assert_eq!(cfg.max_key_frame_interval, 240);
+        assert_eq!(cfg.tile_cols, 0);
+        assert_eq!(cfg.tile_rows, 0);
+        assert_eq!(cfg.tiles, 0);
+        assert!(!cfg.low_latency);
+        assert!(!cfg.error_resilient);
+    }
+
+    #[test]
+    fn av1_encoder_config_chained_setters() {
+        let cfg = Av1EncoderConfig::new()
+            .speed_preset(8)
+            .quantizer(80)
+            .key_frame_interval(60, 240)
+            .tile_cols(2)
+            .tile_rows(2)
+            .low_latency(true)
+            .error_resilient(true);
+        assert_eq!(cfg.speed_preset, 8);
+        assert_eq!(cfg.rate_control, Av1RateControl::Quantizer(80));
+        assert_eq!(cfg.min_key_frame_interval, 60);
+        assert_eq!(cfg.max_key_frame_interval, 240);
+        assert_eq!(cfg.tile_cols, 2);
+        assert_eq!(cfg.tile_rows, 2);
+        assert!(cfg.low_latency);
+        assert!(cfg.error_resilient);
+    }
+
+    #[test]
+    fn av1_encoder_config_speed_preset_clamps_to_10() {
+        let cfg = Av1EncoderConfig::new().speed_preset(255);
+        assert_eq!(cfg.speed_preset, 10);
+    }
+
+    #[test]
+    fn av1_encoder_config_bitrate_overrides_quantizer() {
+        // Last writer wins on rate_control — bitrate(..) should replace
+        // an earlier quantizer(..) and vice versa.
+        let cfg = Av1EncoderConfig::new().quantizer(50).bitrate(2_000_000);
+        assert_eq!(cfg.rate_control, Av1RateControl::Bitrate(2_000_000));
+
+        let cfg = Av1EncoderConfig::new().bitrate(2_000_000).quantizer(50);
+        assert_eq!(cfg.rate_control, Av1RateControl::Quantizer(50));
+    }
+
+    #[test]
+    fn av1_encoder_with_config_quantizer_mode() {
+        // Constructing with an explicit quantizer config should succeed and
+        // produce a working encoder regardless of stream_info.bitrate.
+        let mut stream_info = make_stream_info();
+        stream_info.bitrate = Some(1_500_000); // should be ignored — config wins
+        let config = Av1EncoderConfig::new().speed_preset(10).quantizer(120);
+        let encoder = Av1Encoder::with_config(stream_info, config)
+            .expect("encoder construction should succeed");
+        // Codec config should still be available immediately.
+        assert!(!encoder.codec_config().is_empty());
+    }
+
+    #[test]
+    fn av1_encoder_with_config_bitrate_mode() {
+        let stream_info = make_stream_info();
+        let config = Av1EncoderConfig::new()
+            .bitrate(2_500_000)
+            .key_frame_interval(60, 240)
+            .tiles(4);
+        let encoder = Av1Encoder::with_config(stream_info, config)
+            .expect("encoder construction should succeed");
+        assert_eq!(encoder.codec(), "av1");
+        assert!(!encoder.codec_config().is_empty());
+    }
+
+    #[test]
+    fn av1_encoder_new_promotes_stream_info_bitrate_to_rate_control() {
+        // The legacy `new` path should still honor stream_info.bitrate by
+        // converting it into a Bitrate rate_control internally.
+        let mut stream_info = make_stream_info();
+        stream_info.bitrate = Some(750_000);
+        let encoder = Av1Encoder::new(stream_info).expect("should succeed");
+        assert_eq!(encoder.codec(), "av1");
+    }
+
+    #[test]
+    fn av1_encoder_with_config_rejects_wrong_codec() {
+        let stream_info = StreamInfo::new(0, MediaType::Video, "vp9".to_string())
+            .with_params(StreamParams::Video(VideoStreamParams::new(
+                320,
+                240,
+                PixelFormat::YUV420P,
+            )))
+            .with_time_base(1, 30);
+        let result = Av1Encoder::with_config(stream_info, Av1EncoderConfig::new());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn av1_encoder_with_config_10bit_pixel_format() {
+        let stream_info = StreamInfo::new(0, MediaType::Video, "av1".to_string())
+            .with_params(StreamParams::Video(VideoStreamParams::new(
+                320,
+                240,
+                PixelFormat::YUV420P10LE,
+            )))
+            .with_time_base(1, 30);
+        let config = Av1EncoderConfig::new().speed_preset(8);
+        let encoder = Av1Encoder::with_config(stream_info, config)
+            .expect("10-bit AV1 encoder should construct");
+        assert_eq!(encoder.codec(), "av1");
     }
 }

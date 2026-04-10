@@ -354,11 +354,26 @@ Implement Packet and Frame abstractions with support for various media types. Th
     depth is locked at construction from `StreamInfo.params.pixel_format`
     because `rav1e::Context<T>` is generic — the encoder holds an enum
     `Rav1eVariant::{Eight(Context<u8>), Ten(Context<u16>)}` chosen up front.
-  - Bitrate mode if `StreamInfo.bitrate` is set; otherwise quantizer mode at
-    rav1e default qp = 100.
-  - Speed preset 6 (rav1e default — balanced quality/speed). For testing,
-    even at preset 6 a single 320x240 30-frame encode dominates a debug-mode
-    test run, so the round-trip test uses 160x120 / 8 frames.
+  - **Configuration**: `Av1EncoderConfig` builder exposes:
+    - `speed_preset(0..=10)` — clamped to 10. Default 6.
+    - `rate_control(Av1RateControl)` with shorthand `quantizer(u8)` and
+      `bitrate(u32 bps)`. The two are mutually exclusive (modeled as an enum)
+      and the last setter wins. Default `Quantizer(100)`.
+    - `key_frame_interval(min, max)` — `max == 0` maps to "infinite" via
+      rav1e's `set_key_frame_interval`. Default 12 / 240.
+    - `tile_cols`, `tile_rows`, `tiles` — 0 lets rav1e choose. Default 0/0/0.
+    - `low_latency`, `error_resilient` — bool flags. Default false.
+  - Three constructors:
+    - `Av1Encoder::new(stream_info)` — uses `Av1EncoderConfig::default()`.
+      For backwards compatibility, if `stream_info.bitrate` is set it's
+      promoted into `Av1RateControl::Bitrate(..)` automatically.
+    - `Av1Encoder::with_bitrate(stream_info, bps)` — sets
+      `stream_info.bitrate` then delegates to `new`. Legacy convenience.
+    - `Av1Encoder::with_config(stream_info, config)` — preferred for any
+      non-default settings. The config wins over `stream_info.bitrate`.
+  - For testing, even at speed preset 6 a single 320x240 30-frame encode
+    dominates a debug-mode test run, so the round-trip test uses
+    160x120 / 8 frames.
   - PTS handling: rav1e doesn't take PTS, only sequential `input_frameno`s.
     We track input PTS in a `VecDeque<Option<i64>>` and pop one entry per
     output packet, since rav1e emits packets in display order with
