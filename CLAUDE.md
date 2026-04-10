@@ -13,7 +13,7 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 ### Default (MIT License)
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
-- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 decode ✅ (dav1d/BSD-2-Clause); AV1 encode (rav1e/BSD-2-Clause) planned
+- **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 decode ✅ (dav1d/BSD-2-Clause), AV1 encode ✅ (rav1e/BSD-2-Clause)
 - **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), MP3 decode ✅ (minimp3/MIT); Vorbis (lewton/MIT), FLAC (claxon/Apache-2.0) planned
 
 ### Optional GPL Features
@@ -42,7 +42,7 @@ x264 = { version = "...", optional = true }
 | VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit) |
 | VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit; 10-bit Profile 2 planned) |
 | AV1 (decode) | dav1d | BSD-2-Clause | *(default)* | ✅ Implemented (Main + Main 10, 8-bit + 10-bit) |
-| AV1 (encode) | rav1e | BSD-2-Clause | *(default)* | Planned |
+| AV1 (encode) | rav1e | BSD-2-Clause | *(default)* | ✅ Implemented (8-bit + 10-bit, YUV420) |
 | H.264 (decode) | rust_h264 | MIT/Apache-2.0 | *(default)* | ✅ Implemented (Baseline, Main, High) |
 | H.264 (decode) | VideoToolbox | Apple | `videotoolbox` | ✅ Implemented (all profiles, macOS) |
 | H.264 (encode) | x264 | **GPL v2+** | `gpl-x264` | ✅ Implemented |
@@ -98,7 +98,7 @@ rust_media/
 │   │   └── MP4 demuxer/muxer ✅
 │   │
 │   ├── rust_media_codec/   # Codec implementations
-│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode, 8/10-bit), AV1 ✅ (dav1d decode, 8/10-bit; rav1e encode planned)
+│   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode, 8/10-bit), AV1 ✅ (dav1d decode + rav1e encode, 8/10-bit)
 │   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations
@@ -244,6 +244,7 @@ Implement Packet and Frame abstractions with support for various media types. Th
 - **Codec round-trip tests** (`rust_media_codec/tests/`) — encode → decode → verify content preservation:
   - `opus_roundtrip_test`: 1 kHz sine → Opus → recover frequency + RMS within tolerance
   - `vp8_roundtrip_test`, `vp9_roundtrip_test`: color ramp → encode → verify per-frame mean Y
+  - `av1_roundtrip_test`: color ramp → rav1e encode → dav1d decode → verify mean Y; also asserts `codec_config()` first byte is `0x81` (av1C marker+version)
   - `h264_roundtrip_test` (gpl-x264): exercises B-frame reordering through the POC reorder buffer
   - `aac_roundtrip_test` (fdk-aac): sine wave with AudioSpecificConfig wiring
 - **MP4 full pipeline test** (`rust_media_format/tests/mp4_roundtrip_test.rs`): generate → encode (VP9 + Opus) → mux to MP4 → demux → decode → verify content. Exercises sample tables, codec config records, stream metadata round-trip.
@@ -290,12 +291,24 @@ Implement Packet and Frame abstractions with support for various media types. Th
   - See `crates/rust_media_codec/examples/test_vp8_codec.rs` for decode/encode roundtrip example
 - ✅ **H.264/AVC** (decoder + encoder) **IMPLEMENTED**
   - **Decoder**: rust_h264 (MIT/Apache-2.0) in `rust_media_codec/src/video/h264.rs`
-    - Uses rust_h264 crate (v0.2.0) - pure Rust H.264 decoder
+    - Uses rust_h264 crate (v0.3.0) - pure Rust H.264 decoder
     - Supports Baseline, Main, and High profiles
     - YUV420P (I420) output format
-    - POC-based frame reordering for correct display order with B-frames
-    - Supports both AVCC format (MP4) and Annex B format (raw H.264)
-    - Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
+    - **Display-order output** comes from upstream `decoder::OrderedDecoder`,
+      which wraps the raw decoder with a POC-based reorder buffer (max depth
+      16) and tracks GOP boundaries via IDR slices. We previously did this
+      ourselves with a `BinaryHeap<PocFrame>` and an IDR-counter; that's
+      gone in favor of the upstream implementation.
+    - **AVCC parsing** comes from `nal::parse_avcc_config` (extracts SPS/PPS
+      and length-prefix size from the `avcC` box) and `nal::parse_avcc`
+      (parses length-prefixed sample data). No more hand-rolled
+      `avcc_to_annex_b` conversion.
+    - Supports both AVCC samples (MP4/MKV) and Annex B (raw H.264). The
+      decoder picks the parser based on whether `extra_data` is non-empty.
+    - PTS handling: rust_h264 has no PTS field, but `OrderedDecoder` already
+      emits frames in display order (which matches input order at the
+      packet boundary), so a simple `VecDeque<Option<i64>>` FIFO suffices —
+      we push one entry per input packet and pop one per output frame.
   - **Encoder**: x264 (GPL v2+) in `rust_media_codec/src/video/x264.rs`
     - Requires `gpl-x264` feature flag
     - Uses x264 crate (v0.5.0) - safe Rust bindings to libx264
@@ -335,10 +348,38 @@ Implement Packet and Frame abstractions with support for various media types. Th
     8/10/12, **not** the storage size — easy thing to misread in the docs)
   - PTS round-tripped through dav1d's `timestamp` field via a small monotonic
     counter map, since dav1d doesn't preserve the original PTS otherwise
-- 📋 **AV1 encoder (rav1e)** — planned. Pure-Rust, BSD-2-Clause, supports 10-bit
-  natively. Would close the loop on 10-bit (currently any 10-bit input is
-  forced down to 8-bit at the encoder boundary because no default-build
-  encoder supports 10-bit).
+- ✅ **AV1 encoder (rav1e)** **IMPLEMENTED** in `rust_media_codec/src/video/av1.rs`
+  - Pure-Rust, BSD-2-Clause, no external library required (in default build)
+  - Supports both `YUV420P` (8-bit) and `YUV420P10LE` (10-bit) input. Bit
+    depth is locked at construction from `StreamInfo.params.pixel_format`
+    because `rav1e::Context<T>` is generic — the encoder holds an enum
+    `Rav1eVariant::{Eight(Context<u8>), Ten(Context<u16>)}` chosen up front.
+  - Bitrate mode if `StreamInfo.bitrate` is set; otherwise quantizer mode at
+    rav1e default qp = 100.
+  - Speed preset 6 (rav1e default — balanced quality/speed). For testing,
+    even at preset 6 a single 320x240 30-frame encode dominates a debug-mode
+    test run, so the round-trip test uses 160x120 / 8 frames.
+  - PTS handling: rav1e doesn't take PTS, only sequential `input_frameno`s.
+    We track input PTS in a `VecDeque<Option<i64>>` and pop one entry per
+    output packet, since rav1e emits packets in display order with
+    monotonically increasing `input_frameno`.
+  - **Codec config record**: `Av1Encoder::codec_config()` exposes the
+    sequence header in the format expected by both ISOBMFF (av1C box) and
+    Matroska (CodecPrivate). It can be called immediately after construction
+    (before any frames are sent) because the header is fully determined by
+    the encoder config. The CLI uses this to populate `extra_data` on the
+    muxer's stream before `add_stream()`.
+  - **CLI integration**: When `-v av1` is passed, `create_video_encoder`
+    propagates the input pixel format (8-bit or 10-bit) so 10-bit content
+    is encoded natively. The CLI also sets `encoder_supports_10bit = true`
+    for AV1, which **disables** the auto 10→8 bit downconversion that
+    other 8-bit-only encoders trigger.
+  - End-to-end verified: H.264 → AV1 (8-bit) and 10-bit HEVC → AV1
+    (10-bit) both work without information loss; round-trip through dav1d
+    confirms the av1C bytes are valid.
+  - See `crates/rust_media_codec/tests/av1_roundtrip_test.rs` for the
+    encode → decode round-trip test (uses generated color ramps + per-frame
+    mean-Y validation, no committed binary fixtures).
 
 **Audio Codecs** (decoders/encoders) - Priority:
 - ✅ **PCM** (Pulse Code Modulation): Raw uncompressed audio - fundamental for all audio processing. **IMPLEMENTED** in `rust_media_codec/src/audio/pcm.rs`

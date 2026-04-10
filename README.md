@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MKV ✅ demuxer, MP4 ✅ demuxer + muxer)
-- **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AV1 ✅ decode, AAC ✅)
+- **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AV1 ✅ decode + encode, AAC ✅)
 - **Filter** support (audio resampling ✅, volume ✅, video scale ✅, crop ✅, SSIM quality metric ✅)
 - **10-bit pixel format** support end-to-end (decode, scale, crop, with auto 10→8 conversion at encoder boundary)
 - **Format detection** from magic bytes with file extension fallback
@@ -123,6 +123,7 @@ This project is in active development. Current status:
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
 - ✅ **H.265/HEVC** decoder (via VideoToolbox, requires `videotoolbox` feature) - *macOS only, hardware accelerated, 8-bit + 10-bit (Main 10 / HDR)*
 - ✅ **AV1** decoder (via dav1d, BSD-2-Clause, default build) - *Main + Main 10 profiles (8-bit + 10-bit)*
+- ✅ **AV1** encoder (via rav1e, BSD-2-Clause, default build) - *8-bit and 10-bit YUV420; pure-Rust, no external libs*
 - ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
 - 📋 AV1 encoder (rav1e) - Planned
 

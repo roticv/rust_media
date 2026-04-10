@@ -1,144 +1,90 @@
 //! H.264/AVC video decoder implementation using rust_h264
 //!
-//! Provides H.264 decoding via the rust_h264 crate (pure Rust implementation).
-//!
-//! # Licensing
-//!
-//! rust_h264 is licensed under MIT/Apache-2.0, making it compatible with the project's
-//! MIT/Apache-2.0 default license. No special feature flags are required.
+//! Provides H.264 decoding via the rust_h264 crate (pure Rust implementation,
+//! MIT/Apache-2.0). The default build needs no external libraries or feature
+//! flags.
 //!
 //! # Profile Support
 //!
-//! This decoder supports Baseline, Main, and High profiles.
+//! Baseline, Main, and High profiles. YUV420P (I420) output only.
 //!
-//! # Current Implementation Status
+//! # Implementation Notes
 //!
-//! ## Decoder
-//! - Supports Baseline, Main, and High Profile decoding with YUV420P (I420) output
-//! - Supports both AVCC format (MP4) and Annex B format (raw H.264)
-//! - Automatic SPS/PPS extraction from AVCDecoderConfigurationRecord
-//! - Proper flush handling for B-frames and buffered data
-//! - POC-based frame reordering for correct display order (matching play.rs reference)
+//! As of `rust_h264` 0.3.0, two pieces of functionality that we used to
+//! implement manually now live in the upstream crate:
 //!
-//! # Example
+//! 1. **AVCC parsing** — `nal::parse_avcc_config` extracts SPS/PPS from an
+//!    `avcC` (AVCDecoderConfigurationRecord) box and `nal::parse_avcc` parses
+//!    length-prefixed sample data into NAL units. We previously did this with
+//!    a hand-rolled `avcc_to_annex_b` plus `parse_annex_b`.
 //!
-//! ```rust,ignore
-//! use rust_media_core::{StreamInfo, MediaType, VideoStreamParams, PixelFormat};
-//! use rust_media_codec::H264Decoder;
+//! 2. **Display-order frame reordering** — `decoder::OrderedDecoder` wraps
+//!    the raw decoder, tracks GOP boundaries via IDR slices, and emits frames
+//!    in display order via a POC-based reorder buffer. We previously did this
+//!    with our own `BinaryHeap<PocFrame>` and IDR-counter logic.
 //!
-//! let video_params = VideoStreamParams::new(1920, 1080, PixelFormat::YUV420P);
-//! let stream_info = StreamInfo::new(0, MediaType::Video, "h264".to_string())
-//!     .with_time_base(1, 90000)
-//!     .with_params(rust_media_core::StreamParams::Video(video_params));
-//!
-//! let mut decoder = H264Decoder::new(stream_info)?;
-//! // ... decode packets using send_packet() and receive_frame()
-//! ```
+//! Both responsibilities now belong to upstream, so this file is mostly a
+//! thin adapter between the rust_h264 types and the `rust_media_core`
+//! `Decoder` trait.
 
-use rust_h264::decoder::Decoder as RustH264Decoder;
-use rust_h264::nal::{parse_annex_b, NalUnitType};
+use rust_h264::decoder::OrderedDecoder;
+use rust_h264::nal::{parse_annex_b, parse_avcc, parse_avcc_config, AvccConfig};
 use rust_media_core::{
     Decoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
 };
-use std::collections::BinaryHeap;
-use std::cmp::Ordering;
+use std::collections::VecDeque;
 
-/// Annex B start code (4-byte version)
-const ANNEX_B_START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
-
-/// Max number of frames to buffer before forcing output from the reorder buffer.
-const REORDER_BUFFER_DEPTH: usize = 4;
-
-/// A decoded frame with its POC and IDR epoch, for POC-based reordering.
-struct PocFrame {
-    frame: Frame,
-    idr_count: u32,
-    poc: i32,
-}
-
-impl PartialEq for PocFrame {
-    fn eq(&self, other: &Self) -> bool {
-        (self.idr_count, self.poc) == (other.idr_count, other.poc)
-    }
-}
-
-impl Eq for PocFrame {}
-
-impl PartialOrd for PocFrame {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PocFrame {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse for min-heap (BinaryHeap is max-heap)
-        (other.idr_count, other.poc).cmp(&(self.idr_count, self.poc))
-    }
-}
-
-/// H.264/AVC video decoder using rust_h264
+/// H.264/AVC video decoder using rust_h264.
 ///
-/// Decodes H.264-compressed video packets into raw YUV frames.
-///
-/// # Frame Reordering
-///
-/// With B-frames, the decoder outputs frames in decode order which differs from
-/// display order. This decoder uses a POC-based reorder buffer (matching the
-/// reference play.rs implementation) to emit frames in correct display order.
-/// PTS values from input packets are collected and assigned to output frames
-/// in display order.
+/// Decodes H.264-compressed video packets into raw YUV frames in display
+/// order. Accepts both AVCC sample data (from MP4/MKV) and Annex B data
+/// (from raw H.264 streams).
 ///
 /// # MP4 Support
 ///
-/// This decoder automatically handles H.264 data from MP4 containers:
-/// - Parses AVCDecoderConfigurationRecord from `extra_data` to extract SPS/PPS
-/// - Converts AVCC format (length-prefixed NAL units) to Annex B format
-/// - Sends SPS/PPS to decoder on first packet
+/// Pass the `avcC` box payload via `StreamInfo.extra_data`. We parse it via
+/// `rust_h264::nal::parse_avcc_config`, feed the SPS/PPS NALs to the decoder
+/// once, and use the recorded `length_size` for every subsequent sample.
 ///
-/// # Notes
+/// # PTS Handling
 ///
-/// - Input packets can be in AVCC format (MP4) or Annex B format (raw H.264)
-/// - Output is always YUV420P (I420) format
-/// - The decoder handles B-frames internally; use `flush()` to retrieve buffered frames
+/// rust_h264 doesn't carry PTS through the decoder, but `OrderedDecoder`
+/// already returns frames in display order — which is the same order PTS
+/// values arrive in input packets. We push input PTSes into a FIFO and pop
+/// them as output frames are produced.
+///
+/// # Output Format
+///
+/// Always YUV420P (I420). Use `flush()` to drain remaining frames at EOS.
 pub struct H264Decoder {
     stream_info: StreamInfo,
-    decoder: RustH264Decoder,
-    /// Frames ready for output (already in display order with correct PTS)
-    output_frames: Vec<Frame>,
+    decoder: OrderedDecoder,
+    /// Frames already converted to `rust_media_core::Frame` and ready to hand
+    /// out via `receive_frame`. They're in display order.
+    output_frames: VecDeque<Frame>,
     flushed: bool,
-    /// NAL unit length size in bytes (1, 2, or 4) from AVCDecoderConfigurationRecord
-    nal_length_size: usize,
-    /// SPS NAL units extracted from AVCDecoderConfigurationRecord
-    sps_list: Vec<Vec<u8>>,
-    /// PPS NAL units extracted from AVCDecoderConfigurationRecord
-    pps_list: Vec<Vec<u8>>,
-    /// Whether we've sent the SPS/PPS to the decoder
-    sent_sps_pps: bool,
-    /// POC-based reorder buffer (min-heap by (idr_count, poc))
-    reorder_buf: BinaryHeap<PocFrame>,
-    /// Current IDR epoch counter - incremented at each IDR boundary
-    idr_count: u32,
-    /// PTS values from input packets, sorted ascending (min-heap).
-    /// Popped in ascending order and assigned to frames as they leave the
-    /// reorder buffer in display order.
-    pts_heap: BinaryHeap<std::cmp::Reverse<i64>>,
-    /// Count of packets with no PTS (assigned after all timestamped frames)
-    pts_none_count: usize,
+    /// Length-prefix size from `avcC`. `None` means input is Annex B and we
+    /// use `parse_annex_b` instead of `parse_avcc`.
+    avcc_length_size: Option<usize>,
+    /// Whether SPS/PPS have been fed to the decoder. Only relevant for the
+    /// AVCC path; Annex B streams carry parameter sets inline.
+    sent_parameter_sets: bool,
+    /// Cached extra_data so we can re-parse SPS/PPS on `reset()`. The
+    /// `AvccConfig` returned by `parse_avcc_config` borrows from this slice,
+    /// so we can't store the parsed result directly.
+    extra_data: Vec<u8>,
+    /// PTS values from input packets in arrival order. Output frames come out
+    /// in display (== arrival) order, so a FIFO is sufficient — no heap.
+    pts_queue: VecDeque<Option<i64>>,
 }
 
 impl H264Decoder {
-    /// Creates a new H.264 decoder from stream information
+    /// Creates a new H.264 decoder from stream information.
     ///
-    /// # Arguments
-    ///
-    /// * `stream_info` - Stream information (codec must be "h264" or "avc")
-    ///
-    /// # Returns
-    ///
-    /// A new H264Decoder or an error if initialization fails
+    /// `stream_info.codec` must be `"h264"` or `"avc"`. If `extra_data` is
+    /// non-empty it's parsed as an `avcC` configuration record and the
+    /// resulting SPS/PPS are fed to the decoder before any sample data.
     pub fn new(stream_info: StreamInfo) -> Result<Self> {
-        // Validate codec - accept both "h264" and "avc" (common alternative names)
         if stream_info.codec != "h264" && stream_info.codec != "avc" {
             return Err(Error::Unsupported(format!(
                 "Expected h264/avc codec, got {}",
@@ -146,126 +92,65 @@ impl H264Decoder {
             )));
         }
 
-        let decoder = RustH264Decoder::new();
-
-        // Parse AVCDecoderConfigurationRecord if present in extra_data
-        let (nal_length_size, sps_list, pps_list) = if !stream_info.extra_data.is_empty() {
-            parse_avcc_config(&stream_info.extra_data)?
-        } else {
-            // No extra_data - assume Annex B format input
-            (0, Vec::new(), Vec::new())
+        let extra_data = stream_info.extra_data.clone();
+        let mut decoder = Self {
+            stream_info,
+            decoder: OrderedDecoder::new(),
+            output_frames: VecDeque::new(),
+            flushed: false,
+            avcc_length_size: None,
+            sent_parameter_sets: false,
+            extra_data,
+            pts_queue: VecDeque::new(),
         };
 
-        Ok(Self {
-            stream_info,
-            decoder,
-            output_frames: Vec::new(),
-            flushed: false,
-            nal_length_size,
-            sps_list,
-            pps_list,
-            sent_sps_pps: false,
-            reorder_buf: BinaryHeap::new(),
-            idr_count: 0,
-            pts_heap: BinaryHeap::new(),
-            pts_none_count: 0,
-        })
+        // If we have an avcC config, parse it now and prime the decoder with
+        // the SPS/PPS NALs. This lets us decode the very first sample without
+        // having to wait for inline parameter sets.
+        if !decoder.extra_data.is_empty() {
+            decoder.feed_parameter_sets()?;
+        }
+
+        Ok(decoder)
     }
 
-    /// Converts AVCC format data to Annex B format
-    ///
-    /// AVCC format: [length][NAL unit][length][NAL unit]...
-    /// Annex B format: [start code][NAL unit][start code][NAL unit]...
-    fn avcc_to_annex_b(&self, data: &[u8]) -> Vec<u8> {
-        if self.nal_length_size == 0 {
-            // Not AVCC format, return as-is
-            return data.to_vec();
+    /// Parse the cached `avcC` extra_data, feed SPS/PPS to the underlying
+    /// decoder, and remember the length-prefix size for sample parsing.
+    fn feed_parameter_sets(&mut self) -> Result<()> {
+        let cfg: AvccConfig<'_> = parse_avcc_config(&self.extra_data)
+            .map_err(|e| Error::InvalidData(format!("avcC parse failed: {}", e)))?;
+
+        // Feed SPS/PPS to the decoder. These produce no frames, so we can
+        // ignore the (empty) Vec returned by OrderedDecoder.
+        for nal in cfg.sps_nals.iter().chain(cfg.pps_nals.iter()) {
+            self.decoder
+                .decode_nal(nal)
+                .map_err(|e| Error::Decode(format!("H.264 SPS/PPS decode error: {}", e)))?;
         }
 
-        let mut output = Vec::with_capacity(data.len() + 64);
-        let mut pos = 0;
-
-        while pos + self.nal_length_size <= data.len() {
-            // Read NAL unit length
-            let nal_length = match self.nal_length_size {
-                1 => data[pos] as usize,
-                2 => u16::from_be_bytes([data[pos], data[pos + 1]]) as usize,
-                4 => u32::from_be_bytes([
-                    data[pos],
-                    data[pos + 1],
-                    data[pos + 2],
-                    data[pos + 3],
-                ]) as usize,
-                _ => break,
-            };
-
-            pos += self.nal_length_size;
-
-            if pos + nal_length > data.len() {
-                break;
-            }
-
-            // Add start code and NAL unit
-            output.extend_from_slice(&ANNEX_B_START_CODE);
-            output.extend_from_slice(&data[pos..pos + nal_length]);
-
-            pos += nal_length;
-        }
-
-        output
-    }
-
-    /// Sends SPS/PPS to the decoder
-    fn send_sps_pps(&mut self) -> Result<()> {
-        if self.sent_sps_pps || (self.sps_list.is_empty() && self.pps_list.is_empty()) {
-            return Ok(());
-        }
-
-        // Build Annex B data with SPS and PPS
-        let mut config_data = Vec::new();
-
-        for sps in &self.sps_list {
-            config_data.extend_from_slice(&ANNEX_B_START_CODE);
-            config_data.extend_from_slice(sps);
-        }
-
-        for pps in &self.pps_list {
-            config_data.extend_from_slice(&ANNEX_B_START_CODE);
-            config_data.extend_from_slice(pps);
-        }
-
-        if !config_data.is_empty() {
-            // Parse the config data into NAL units and feed to decoder
-            let nals = parse_annex_b(&config_data);
-            for nal in &nals {
-                let _ = self.decoder.decode_nal(nal);
-            }
-        }
-
-        self.sent_sps_pps = true;
+        self.avcc_length_size = Some(cfg.length_size);
+        self.sent_parameter_sets = true;
         Ok(())
     }
 
-    /// Convert a rust_h264 Frame to a rust_media_core Frame (without PTS - assigned later)
+    /// Convert a rust_h264 Frame to a rust_media_core Frame. PTS is assigned
+    /// later from the FIFO since rust_h264 has no PTS field.
     fn convert_frame(h264_frame: &rust_h264::decoder::Frame) -> Result<Frame> {
         let width = h264_frame.width as usize;
         let height = h264_frame.height as usize;
 
         let mut frame = Frame::new_video(width, height, PixelFormat::YUV420P);
 
-        // Copy Y plane
         let y_plane = frame
             .plane_mut(0)
             .ok_or_else(|| Error::InvalidData("Failed to get Y plane".to_string()))?;
         y_plane.copy_from_slice(&h264_frame.y);
 
-        // Copy U plane
         let u_plane = frame
             .plane_mut(1)
             .ok_or_else(|| Error::InvalidData("Failed to get U plane".to_string()))?;
         u_plane.copy_from_slice(&h264_frame.u);
 
-        // Copy V plane
         let v_plane = frame
             .plane_mut(2)
             .ok_or_else(|| Error::InvalidData("Failed to get V plane".to_string()))?;
@@ -274,120 +159,19 @@ impl H264Decoder {
         Ok(frame)
     }
 
-    /// Pop the next PTS value (smallest) from the heap and assign to a frame.
-    fn pop_pts_for_frame(&mut self, frame: &mut Frame) {
-        if let Some(std::cmp::Reverse(pts)) = self.pts_heap.pop() {
-            frame.set_pts(Some(pts));
-        } else if self.pts_none_count > 0 {
-            self.pts_none_count -= 1;
-            frame.set_pts(None);
+    /// Push a batch of decoded frames into the output queue, attaching PTS
+    /// values from the FIFO in arrival order.
+    fn push_decoded(&mut self, frames: Vec<rust_h264::decoder::Frame>) -> Result<()> {
+        for h264_frame in frames {
+            let mut frame = Self::convert_frame(&h264_frame)?;
+            // Pop the next PTS — frames come out in display order (which
+            // matches input order), so a simple FIFO is correct.
+            let pts = self.pts_queue.pop_front().flatten();
+            frame.set_pts(pts);
+            self.output_frames.push_back(frame);
         }
+        Ok(())
     }
-
-    /// Emit frames from the reorder buffer when it exceeds the max depth.
-    /// PTS is assigned immediately as frames leave the buffer.
-    fn drain_reorder_ready(&mut self) {
-        while self.reorder_buf.len() > REORDER_BUFFER_DEPTH {
-            if let Some(pf) = self.reorder_buf.pop() {
-                let mut frame = pf.frame;
-                self.pop_pts_for_frame(&mut frame);
-                self.output_frames.push(frame);
-            }
-        }
-    }
-
-    /// Flush the reorder buffer completely, emitting all frames in display order
-    /// with PTS assigned immediately.
-    fn flush_reorder_buf(&mut self) {
-        let mut frames: Vec<_> = self.reorder_buf.drain().collect();
-        frames.sort_by_key(|pf| (pf.idr_count, pf.poc));
-        for pf in frames {
-            let mut frame = pf.frame;
-            self.pop_pts_for_frame(&mut frame);
-            self.output_frames.push(frame);
-        }
-    }
-}
-
-type AvccConfig = (usize, Vec<Vec<u8>>, Vec<Vec<u8>>);
-
-/// Parses AVCDecoderConfigurationRecord from extra_data.
-///
-/// Format:
-/// - configurationVersion (1 byte) = 1
-/// - AVCProfileIndication (1 byte)
-/// - profile_compatibility (1 byte)
-/// - AVCLevelIndication (1 byte)
-/// - reserved (6 bits) + lengthSizeMinusOne (2 bits)
-/// - reserved (3 bits) + numOfSequenceParameterSets (5 bits)
-/// - For each SPS: length (2 bytes) + SPS data
-/// - numOfPictureParameterSets (1 byte)
-/// - For each PPS: length (2 bytes) + PPS data
-fn parse_avcc_config(data: &[u8]) -> Result<AvccConfig> {
-    if data.len() < 7 {
-        return Err(Error::InvalidData(
-            "AVCDecoderConfigurationRecord too short".to_string(),
-        ));
-    }
-
-    let config_version = data[0];
-    if config_version != 1 {
-        return Err(Error::InvalidData(format!(
-            "Unsupported AVCDecoderConfigurationRecord version: {}",
-            config_version
-        )));
-    }
-
-    // lengthSizeMinusOne is the bottom 2 bits of byte 4
-    let length_size_minus_one = data[4] & 0x03;
-    let nal_length_size = (length_size_minus_one + 1) as usize;
-
-    // numOfSequenceParameterSets is the bottom 5 bits of byte 5
-    let num_sps = (data[5] & 0x1F) as usize;
-
-    let mut pos = 6;
-    let mut sps_list = Vec::with_capacity(num_sps);
-
-    // Parse SPS entries
-    for _ in 0..num_sps {
-        if pos + 2 > data.len() {
-            break;
-        }
-        let sps_length = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2;
-
-        if pos + sps_length > data.len() {
-            break;
-        }
-        sps_list.push(data[pos..pos + sps_length].to_vec());
-        pos += sps_length;
-    }
-
-    // Parse PPS entries
-    if pos >= data.len() {
-        return Ok((nal_length_size, sps_list, Vec::new()));
-    }
-
-    let num_pps = data[pos] as usize;
-    pos += 1;
-
-    let mut pps_list = Vec::with_capacity(num_pps);
-
-    for _ in 0..num_pps {
-        if pos + 2 > data.len() {
-            break;
-        }
-        let pps_length = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2;
-
-        if pos + pps_length > data.len() {
-            break;
-        }
-        pps_list.push(data[pos..pos + pps_length].to_vec());
-        pos += pps_length;
-    }
-
-    Ok((nal_length_size, sps_list, pps_list))
 }
 
 impl Decoder for H264Decoder {
@@ -407,62 +191,49 @@ impl Decoder for H264Decoder {
             )));
         }
 
-        // Send SPS/PPS on first packet if we have them
-        self.send_sps_pps()?;
+        // Track this packet's PTS so we can attach it to the matching output
+        // frame later. One push per input packet, one pop per output frame.
+        self.pts_queue.push_back(packet.pts());
 
-        let pts = packet.pts();
         let data = packet.data();
 
-        // Collect PTS for later assignment in display order
-        match pts {
-            Some(p) => self.pts_heap.push(std::cmp::Reverse(p)),
-            None => self.pts_none_count += 1,
-        }
-
-        // Convert from AVCC to Annex B format if needed
-        let annex_b_data = if self.nal_length_size > 0 {
-            self.avcc_to_annex_b(data)
+        // Two parsing strategies depending on what the upstream container
+        // gave us. The borrow from `data` lives only as long as `nals`, so
+        // we decode within the same scope.
+        let decoded = if let Some(length_size) = self.avcc_length_size {
+            // MP4/MKV path: length-prefixed AVCC samples.
+            let nals = parse_avcc(data, length_size);
+            let mut all = Vec::new();
+            for nal in &nals {
+                let frames = self
+                    .decoder
+                    .decode_nal(nal)
+                    .map_err(|e| Error::Decode(format!("H.264 decode error: {}", e)))?;
+                all.extend(frames);
+            }
+            all
         } else {
-            data.to_vec()
+            // Annex B path: start-code delimited stream. Parameter sets are
+            // inline so there's nothing to feed up front.
+            let nals = parse_annex_b(data);
+            let mut all = Vec::new();
+            for nal in &nals {
+                let frames = self
+                    .decoder
+                    .decode_nal(nal)
+                    .map_err(|e| Error::Decode(format!("H.264 decode error: {}", e)))?;
+                all.extend(frames);
+            }
+            all
         };
 
-        // Parse NAL units and feed to decoder
-        let nals = parse_annex_b(&annex_b_data);
-        for nal in &nals {
-            let is_idr = nal.nal_unit_type == NalUnitType::SliceIdr;
-
-            match self.decoder.decode_nal(nal) {
-                Ok(Some(h264_frame)) => {
-                    let frame = Self::convert_frame(&h264_frame)?;
-                    self.reorder_buf.push(PocFrame {
-                        frame,
-                        idr_count: self.idr_count,
-                        poc: h264_frame.pic_order_cnt,
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return Err(Error::Decode(format!("H.264 decode error: {}", e)));
-                }
-            }
-
-            // After processing, handle IDR boundary: increment epoch and
-            // flush reorder buffer for the completed GOP
-            if is_idr {
-                self.idr_count += 1;
-                self.flush_reorder_buf();
-            }
-        }
-
-        // Emit frames when reorder buffer is full enough
-        self.drain_reorder_ready();
-
+        self.push_decoded(decoded)?;
         Ok(())
     }
 
     fn receive_frame(&mut self) -> Result<Frame> {
-        if !self.output_frames.is_empty() {
-            Ok(self.output_frames.remove(0))
+        if let Some(frame) = self.output_frames.pop_front() {
+            Ok(frame)
         } else if self.flushed {
             Err(Error::EndOfStream)
         } else {
@@ -471,33 +242,26 @@ impl Decoder for H264Decoder {
     }
 
     fn flush(&mut self) -> Result<()> {
-        // Flush remaining frames from the decoder
-        while let Some(h264_frame) = self.decoder.flush() {
-            if let Ok(frame) = Self::convert_frame(&h264_frame) {
-                self.reorder_buf.push(PocFrame {
-                    frame,
-                    idr_count: self.idr_count,
-                    poc: h264_frame.pic_order_cnt,
-                });
-            }
-        }
-
-        // Flush remaining frames from the reorder buffer (PTS assigned inline)
-        self.flush_reorder_buf();
-
+        // Drain whatever's still buffered inside OrderedDecoder. This emits
+        // any pending in-progress frame plus all frames still sitting in the
+        // reorder buffer at end-of-stream.
+        let remaining = self.decoder.flush();
+        self.push_decoded(remaining)?;
         self.flushed = true;
         Ok(())
     }
 
     fn reset(&mut self) -> Result<()> {
-        self.decoder = RustH264Decoder::new();
+        self.decoder = OrderedDecoder::new();
         self.output_frames.clear();
-        self.reorder_buf.clear();
-        self.pts_heap.clear();
-        self.pts_none_count = 0;
-        self.idr_count = 0;
+        self.pts_queue.clear();
         self.flushed = false;
-        self.sent_sps_pps = false;
+        self.sent_parameter_sets = false;
+        self.avcc_length_size = None;
+        // Re-feed parameter sets so the next packet can decode immediately.
+        if !self.extra_data.is_empty() {
+            self.feed_parameter_sets()?;
+        }
         Ok(())
     }
 
@@ -556,62 +320,39 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_avcc_config() {
-        // Example AVCDecoderConfigurationRecord
-        // Version 1, profile 100, compat 0, level 31, 4-byte NAL length
-        // 1 SPS (7 bytes), 1 PPS (4 bytes)
-        let avcc_data = [
+    fn test_h264_decoder_parses_avcc_extra_data() {
+        // Real avcC payload from a 320x240 baseline file. Using bytes from an
+        // actual SPS so the construction (which now feeds parameter sets to
+        // the decoder up front) actually succeeds. The dimensions in the
+        // VideoStreamParams below are placeholder — what we're testing is
+        // that the avcC parser fills in `avcc_length_size` and feeds the
+        // SPS/PPS without error.
+        let avcc_data = vec![
             0x01, // configurationVersion
-            0x64, // AVCProfileIndication (High profile)
-            0x00, // profile_compatibility
-            0x1F, // AVCLevelIndication (3.1)
-            0xFF, // reserved + lengthSizeMinusOne (3 = 4-byte lengths)
-            0xE1, // reserved + numOfSequenceParameterSets (1)
-            0x00, 0x07, // SPS length
-            0x67, 0x64, 0x00, 0x1F, 0xAC, 0xD9, 0x40, // SPS data
+            0x42, // AVCProfileIndication (Baseline)
+            0xc0, // profile_compatibility
+            0x14, // AVCLevelIndication (2.0)
+            0xff, // reserved + lengthSizeMinusOne (3 = 4-byte lengths)
+            0xe1, // reserved + numOfSequenceParameterSets (1)
+            0x00, 0x16, // SPS length (22)
+            // SPS NAL: real baseline 320x240 SPS
+            0x67, 0x42, 0xc0, 0x14, 0x96, 0x54, 0x05, 0x01,
+            0x7b, 0xcb, 0x37, 0x01, 0x01, 0x01, 0x40, 0x00,
+            0x00, 0xfa, 0x00, 0x00, 0x3a, 0x98,
             0x01, // numOfPictureParameterSets
-            0x00, 0x04, // PPS length
-            0x68, 0xEB, 0xE3, 0xCB, // PPS data
+            0x00, 0x04, // PPS length (4)
+            0x68, 0xce, 0x38, 0x80, // PPS NAL
         ];
 
-        let result = parse_avcc_config(&avcc_data);
-        assert!(result.is_ok());
-
-        let (nal_length_size, sps_list, pps_list) = result.unwrap();
-        assert_eq!(nal_length_size, 4);
-        assert_eq!(sps_list.len(), 1);
-        assert_eq!(pps_list.len(), 1);
-        assert_eq!(sps_list[0].len(), 7);
-        assert_eq!(pps_list[0].len(), 4);
-    }
-
-    #[test]
-    fn test_avcc_to_annex_b_conversion() {
-        let video_params = VideoStreamParams::new(640, 480, PixelFormat::YUV420P);
+        let video_params = VideoStreamParams::new(320, 240, PixelFormat::YUV420P);
         let mut stream_info = StreamInfo::new(0, MediaType::Video, "h264".to_string())
             .with_time_base(1, 90000)
             .with_params(rust_media_core::StreamParams::Video(video_params));
+        stream_info.extra_data = avcc_data;
 
-        // Set up with 4-byte NAL length size
-        stream_info.extra_data = vec![
-            0x01, 0x64, 0x00, 0x1F, 0xFF, // config with 4-byte lengths
-            0xE0, // 0 SPS
-            0x00, // 0 PPS
-        ];
-
-        let decoder = H264Decoder::new(stream_info).unwrap();
-
-        // AVCC format: 4-byte length (5) + 5-byte NAL unit
-        let avcc_data = [
-            0x00, 0x00, 0x00, 0x05, // length = 5
-            0x65, 0x01, 0x02, 0x03, 0x04, // NAL unit data
-        ];
-
-        let annex_b = decoder.avcc_to_annex_b(&avcc_data);
-
-        // Should be: start code (4 bytes) + NAL unit (5 bytes)
-        assert_eq!(annex_b.len(), 9);
-        assert_eq!(&annex_b[0..4], &ANNEX_B_START_CODE);
-        assert_eq!(&annex_b[4..9], &[0x65, 0x01, 0x02, 0x03, 0x04]);
+        let decoder = H264Decoder::new(stream_info).expect("avcC should parse");
+        // 4-byte length prefix per lengthSizeMinusOne = 3 in the payload above.
+        assert_eq!(decoder.avcc_length_size, Some(4));
+        assert!(decoder.sent_parameter_sets);
     }
 }

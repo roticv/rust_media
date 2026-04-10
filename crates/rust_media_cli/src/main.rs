@@ -940,7 +940,7 @@ fn transcode_to_mp4(
             };
             let mut out_stream = vs.clone();
             out_stream.index = current_out_idx;
-            out_stream.codec = out_codec;
+            out_stream.codec = out_codec.clone();
             out_stream.bitrate = Some(video_bitrate);
             // Apply crop dimensions first, then scale (chain order matches the
             // pipeline: crop runs before scale).
@@ -954,6 +954,29 @@ fn transcode_to_mp4(
                 if let StreamParams::Video(ref mut vp) = out_stream.params {
                     vp.width = sf.target_width();
                     vp.height = sf.target_height();
+                }
+            }
+            // For AV1 (rav1e), pre-build the encoder to extract the av1C
+            // sequence header — the MP4 muxer needs it to write the av1C box.
+            // The encoder pixel format follows the input bit depth (10-bit for
+            // YUV420P10LE, 8-bit otherwise), matching what create_video_encoder
+            // will use later.
+            if (out_codec == "av1" || out_codec == "av01") && video_codec != "copy" {
+                let av1c = build_av1_codec_config(vs, video_bitrate)?;
+                out_stream.extra_data = av1c;
+                // Reflect 10-bit in the muxer's StreamParams so info readers
+                // see the correct bit_depth field.
+                if let StreamParams::Video(ref mut vp) = out_stream.params {
+                    if matches!(
+                        vs.params,
+                        StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
+                    ) {
+                        vp.pixel_format = PixelFormat::YUV420P10LE;
+                        vp.bit_depth = 10;
+                    } else {
+                        vp.pixel_format = PixelFormat::YUV420P;
+                        vp.bit_depth = 8;
+                    }
                 }
             }
             muxer.add_stream(out_stream)?;
@@ -1073,7 +1096,7 @@ fn transcode_to_webm(
 
             let mut out_stream = vs.clone();
             out_stream.index = current_out_idx;
-            out_stream.codec = out_codec;
+            out_stream.codec = out_codec.clone();
             out_stream.bitrate = Some(video_bitrate);
             // Apply crop dimensions first, then scale (chain order matches the
             // pipeline: crop runs before scale).
@@ -1087,6 +1110,25 @@ fn transcode_to_webm(
                 if let StreamParams::Video(ref mut vp) = out_stream.params {
                     vp.width = sf.target_width();
                     vp.height = sf.target_height();
+                }
+            }
+            // For AV1, pre-build the rav1e encoder to extract the sequence
+            // header (CodecPrivate for Matroska/WebM has the same layout as
+            // av1C for ISOBMFF). Also propagate the 10-bit format flag.
+            if (out_codec == "av1" || out_codec == "av01") && video_codec != "copy" {
+                let av1c = build_av1_codec_config(vs, video_bitrate)?;
+                out_stream.extra_data = av1c;
+                if let StreamParams::Video(ref mut vp) = out_stream.params {
+                    if matches!(
+                        vs.params,
+                        StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
+                    ) {
+                        vp.pixel_format = PixelFormat::YUV420P10LE;
+                        vp.bit_depth = 10;
+                    } else {
+                        vp.pixel_format = PixelFormat::YUV420P;
+                        vp.bit_depth = 8;
+                    }
                 }
             }
             muxer.add_stream(out_stream)?;
@@ -1450,6 +1492,10 @@ fn process_packets<M: Muxer>(
     let mut output_bytes: u64 = 0;
     // One-time notice when 10→8 bit conversion is auto-inserted
     let mut bit_depth_notice_shown = false;
+    // AV1 (rav1e) is the only encoder we currently have that accepts 10-bit
+    // input directly. Everything else gets auto-downconverted from
+    // YUV420P10LE → YUV420P at the encoder boundary.
+    let encoder_supports_10bit = matches!(video_codec, "av1" | "av01");
 
     /// Helper: encode a frame and write resulting packets to the muxer.
     /// Accumulates output bytes written into `output_bytes`.
@@ -1510,13 +1556,16 @@ fn process_packets<M: Muxer>(
                                     }
                                 }
 
-                                // Auto-convert 10-bit → 8-bit if needed.
-                                // Encoders currently only accept YUV420P (8-bit),
-                                // so we downconvert any 10-bit decoded frames.
-                                let frame = if matches!(
-                                    frame.video_params().map(|p| p.format),
-                                    Some(rust_media::PixelFormat::YUV420P10LE)
-                                ) {
+                                // Auto-convert 10-bit → 8-bit if the target
+                                // encoder doesn't accept 10-bit input. AV1
+                                // (rav1e) handles 10-bit natively, so we leave
+                                // YUV420P10LE frames untouched in that case.
+                                let frame = if !encoder_supports_10bit
+                                    && matches!(
+                                        frame.video_params().map(|p| p.format),
+                                        Some(rust_media::PixelFormat::YUV420P10LE)
+                                    )
+                                {
                                     if !bit_depth_notice_shown {
                                         eprintln!(
                                             "Auto-converting video: 10-bit (YUV420P10LE) -> 8-bit (YUV420P)"
@@ -1605,11 +1654,13 @@ fn process_packets<M: Muxer>(
                 }
             }
 
-            // Auto-convert 10-bit → 8-bit if needed
-            let frame = if matches!(
-                frame.video_params().map(|p| p.format),
-                Some(rust_media::PixelFormat::YUV420P10LE)
-            ) {
+            // Auto-convert 10-bit → 8-bit unless the encoder accepts 10-bit
+            let frame = if !encoder_supports_10bit
+                && matches!(
+                    frame.video_params().map(|p| p.format),
+                    Some(rust_media::PixelFormat::YUV420P10LE)
+                )
+            {
                 rust_media_filter::video::yuv420p10le_to_yuv420p(&frame)?
             } else {
                 frame
@@ -1918,17 +1969,59 @@ fn create_decoder_for_stream(
     create_decoder(stream).ok_or_else(|| format!("No decoder available for codec: {}", stream.codec).into())
 }
 
+/// Builds the AV1 sequence header (av1C / Matroska CodecPrivate) for the
+/// given input stream by spinning up a throwaway rav1e encoder.
+///
+/// The sequence header is fully determined by the encoder config (width,
+/// height, bit depth, chroma sampling), so we don't need to send any frames
+/// through the encoder first. The throwaway encoder is dropped immediately
+/// after — the real one is constructed later in `create_video_encoder`.
+fn build_av1_codec_config(
+    input_stream: &StreamInfo,
+    bitrate: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (width, height, frame_rate, input_pixel_format) = match &input_stream.params {
+        StreamParams::Video(p) => (p.width, p.height, p.frame_rate, p.pixel_format),
+        _ => return Err("av1 codec config: not a video stream".into()),
+    };
+    let encoder_pixel_format = match input_pixel_format {
+        PixelFormat::YUV420P10LE => PixelFormat::YUV420P10LE,
+        _ => PixelFormat::YUV420P,
+    };
+    let video_params = VideoStreamParams::new(width, height, encoder_pixel_format)
+        .with_frame_rate(frame_rate.0, frame_rate.1);
+    let stream_info = StreamInfo::new(0, MediaType::Video, "av1".to_string())
+        .with_params(StreamParams::Video(video_params))
+        .with_bitrate(bitrate)
+        .with_time_base(input_stream.time_base.0, input_stream.time_base.1);
+    let encoder = rust_media_codec::Av1Encoder::new(stream_info)?;
+    Ok(encoder.codec_config())
+}
+
 fn create_video_encoder(
     input_stream: &StreamInfo,
     codec: &str,
     bitrate: u64,
 ) -> Result<Box<dyn EncoderWrapper>, Box<dyn std::error::Error>> {
-    let (width, height, frame_rate) = match &input_stream.params {
-        StreamParams::Video(params) => (params.width, params.height, params.frame_rate),
+    let (width, height, frame_rate, input_pixel_format) = match &input_stream.params {
+        StreamParams::Video(params) => (
+            params.width,
+            params.height,
+            params.frame_rate,
+            params.pixel_format,
+        ),
         _ => return Err("Not a video stream".into()),
     };
 
-    let video_params = VideoStreamParams::new(width, height, PixelFormat::YUV420P)
+    // For AV1 we honor the input bit depth so 10-bit content can be encoded
+    // natively without going through the auto-downconversion path. Other
+    // encoders are 8-bit only and always get YUV420P.
+    let encoder_pixel_format = match (codec, input_pixel_format) {
+        ("av1" | "av01", PixelFormat::YUV420P10LE) => PixelFormat::YUV420P10LE,
+        _ => PixelFormat::YUV420P,
+    };
+
+    let video_params = VideoStreamParams::new(width, height, encoder_pixel_format)
         .with_frame_rate(frame_rate.0, frame_rate.1);
 
     let mut stream_info = StreamInfo::new(0, MediaType::Video, codec.to_string())
@@ -1948,6 +2041,10 @@ fn create_video_encoder(
         }
         "vp9" => {
             let encoder = rust_media_codec::Vp9Encoder::new(stream_info)?;
+            Ok(Box::new(encoder))
+        }
+        "av1" | "av01" => {
+            let encoder = rust_media_codec::Av1Encoder::new(stream_info)?;
             Ok(Box::new(encoder))
         }
         #[cfg(feature = "gpl-x264")]

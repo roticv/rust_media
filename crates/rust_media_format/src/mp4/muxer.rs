@@ -435,6 +435,7 @@ impl<W: Write + Seek> Mp4Muxer<W> {
             MediaType::Video => match codec {
                 "h264" | "avc" | "avc1" => Ok(()),
                 "vp9" | "vp09" => Ok(()),
+                "av1" | "av01" => Ok(()),
                 _ => Err(Error::Unsupported(format!(
                     "Unsupported video codec for MP4: {}",
                     codec
@@ -797,6 +798,7 @@ impl<W: Write + Seek> Mp4Muxer<W> {
         let box_type = match codec {
             "h264" | "avc" | "avc1" => AVC1,
             "vp9" | "vp09" => VP09,
+            "av1" | "av01" => AV01,
             _ => {
                 return Err(Error::Unsupported(format!(
                     "Unsupported video codec: {}",
@@ -827,6 +829,7 @@ impl<W: Write + Seek> Mp4Muxer<W> {
         match codec {
             "h264" | "avc" | "avc1" => self.write_avcc(track_index)?,
             "vp9" | "vp09" => self.write_vpcc(track_index)?,
+            "av1" | "av01" => self.write_av1c(track_index)?,
             _ => {}
         }
 
@@ -898,6 +901,26 @@ impl<W: Write + Seek> Mp4Muxer<W> {
 
         let vpcc_end = self.writer.stream_position()?;
         update_box_size(&mut self.writer, vpcc_start, (vpcc_end - vpcc_start) as u32)?;
+        Ok(())
+    }
+
+    /// Writes the av1C (AV1 codec configuration) box.
+    ///
+    /// The contents come from the encoder via `StreamInfo.extra_data`. rav1e
+    /// produces this exact format via `Context::container_sequence_header()`,
+    /// which matches the AV1 ISOBMFF spec section 2.3.1 layout.
+    fn write_av1c(&mut self, track_index: usize) -> Result<()> {
+        let extra_data = self.streams[track_index].extra_data.clone();
+        if extra_data.is_empty() {
+            return Err(Error::InvalidData(
+                "AV1 stream requires av1C config in extra_data (call encoder.codec_config() and put it in StreamInfo.extra_data before muxing)".to_string(),
+            ));
+        }
+
+        let av1c_start = write_box_header_placeholder(&mut self.writer, AV1C)?;
+        self.writer.write_all(&extra_data)?;
+        let av1c_end = self.writer.stream_position()?;
+        update_box_size(&mut self.writer, av1c_start, (av1c_end - av1c_start) as u32)?;
         Ok(())
     }
 

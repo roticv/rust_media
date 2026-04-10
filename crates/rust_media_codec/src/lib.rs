@@ -9,7 +9,7 @@
 //! - **H.264/AVC** - ✅ Decoder implemented (via VideoToolbox, macOS only) - All profiles
 //! - **H.264/AVC** - ✅ Encoder implemented (via x264, requires `gpl-x264` feature)
 //! - **H.265/HEVC** - ✅ Decoder implemented (via VideoToolbox, requires `videotoolbox` feature)
-//! - **AV1** - ✅ Decoder implemented (via dav1d, requires libdav1d)
+//! - **AV1** - ✅ Decoder (dav1d) + Encoder (rav1e), 8-bit and 10-bit, default build
 //!
 //! # Audio Codecs
 //! - **PCM** (raw audio) - ✅ Implemented
@@ -38,7 +38,7 @@ pub mod video;
 pub use audio::mp3::Mp3Decoder;
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
-pub use video::av1::Av1Decoder;
+pub use video::av1::{Av1Decoder, Av1Encoder};
 pub use video::h264::H264Decoder;
 pub use video::vp8::{Vp8Decoder, Vp8Encoder};
 pub use video::vp9::{Vp9Decoder, Vp9Encoder};

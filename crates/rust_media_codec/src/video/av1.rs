@@ -22,10 +22,18 @@
 //! WebM/MKV (`V_AV1` codec ID) containers.
 
 use dav1d::{Decoder as Dav1dDecoder, Error as Dav1dError, PixelLayout, PlanarImageComponent};
+use rav1e::config::SpeedSettings;
+use rav1e::prelude::{
+    ChromaSampling, Config as Rav1eConfig, Context as Rav1eContext, EncoderConfig as Rav1eEncoderConfig,
+    EncoderStatus, FrameType as Rav1eFrameType, Rational,
+};
+use rust_media_core::frame::FrameParams;
 use rust_media_core::{
-    Decoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
+    Decoder, Encoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
+    StreamParams,
 };
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// AV1 video decoder using dav1d
 pub struct Av1Decoder {
@@ -280,6 +288,335 @@ impl Decoder for Av1Decoder {
         self.buffered_frames.clear();
         self.pts_map.clear();
         self.next_timestamp = 0;
+        self.flushed = false;
+        Ok(())
+    }
+
+    fn is_flushed(&self) -> bool {
+        self.flushed
+    }
+}
+
+// ============================================================================
+// AV1 Encoder (rav1e)
+// ============================================================================
+
+/// rav1e encoder context — held as one of two type-specialized variants since
+/// `rav1e::Context<T>` is generic over pixel storage (`u8` for 8-bit,
+/// `u16` for 10-bit). The variant is chosen at construction time based on the
+/// stream's pixel format and never changes afterwards.
+enum Rav1eVariant {
+    Eight(Rav1eContext<u8>),
+    Ten(Rav1eContext<u16>),
+}
+
+/// AV1 video encoder using rav1e (pure-Rust, BSD-2-Clause).
+///
+/// Supports `YUV420P` (8-bit) and `YUV420P10LE` (10-bit) input. The bit depth
+/// is locked at construction time from `StreamInfo`'s pixel format and cannot
+/// change mid-stream.
+///
+/// # Configuration
+///
+/// Currently uses sensible defaults:
+/// - Speed preset: 6 (balanced quality/speed)
+/// - Rate control: bitrate mode if `StreamInfo.bitrate` is set, else quantizer mode
+/// - Keyframe interval: 12–240 frames (rav1e default)
+/// - 4:2:0 chroma subsampling only
+///
+/// More fine-grained configuration (preset, tile counts, low-latency mode)
+/// can be exposed via a builder later.
+///
+/// # Codec Config Record (av1C)
+///
+/// `container_sequence_header()` exposes the sequence header in the format
+/// expected by both ISOBMFF (MP4 av1C box) and Matroska (WebM/MKV CodecPrivate).
+/// Call it after the first packet has been received.
+pub struct Av1Encoder {
+    stream_info: StreamInfo,
+    ctx: Rav1eVariant,
+    /// Bit depth in use (8 or 10). Locked at construction.
+    bit_depth: usize,
+    /// Sequential frame number we've sent so far. Also used as fallback PTS.
+    next_input_frameno: u64,
+    /// PTS values keyed by `input_frameno`, kept in send order. rav1e returns
+    /// packets in display order with sequential `input_frameno`s, so we just
+    /// pop the front of this queue when a packet arrives.
+    pts_queue: VecDeque<Option<i64>>,
+    /// Packets that have been pulled from rav1e but not yet returned via
+    /// `receive_packet`.
+    buffered_packets: VecDeque<Packet>,
+    flushed: bool,
+}
+
+impl Av1Encoder {
+    pub fn new(stream_info: StreamInfo) -> Result<Self> {
+        if stream_info.codec != "av1" && stream_info.codec != "av01" {
+            return Err(Error::Unsupported(format!(
+                "Expected av1 codec, got {}",
+                stream_info.codec
+            )));
+        }
+
+        let video_params = match &stream_info.params {
+            StreamParams::Video(params) => params,
+            _ => {
+                return Err(Error::InvalidData(
+                    "AV1 encoder requires video stream parameters".into(),
+                ))
+            }
+        };
+
+        // Lock bit depth based on the input pixel format. Mixed bit-depth
+        // streams are not supported (rav1e contexts are generic over T).
+        let bit_depth = match video_params.pixel_format {
+            PixelFormat::YUV420P => 8usize,
+            PixelFormat::YUV420P10LE => 10usize,
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "AV1 encoder only supports YUV420P (8-bit) or YUV420P10LE (10-bit), got {:?}",
+                    other
+                )))
+            }
+        };
+
+        let width = video_params.width;
+        let height = video_params.height;
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidData(
+                "AV1 encoder: width/height must be non-zero".into(),
+            ));
+        }
+
+        // Build a sensible default EncoderConfig.
+        let mut enc = Rav1eEncoderConfig::with_speed_preset(6);
+        enc.width = width;
+        enc.height = height;
+        enc.bit_depth = bit_depth;
+        enc.chroma_sampling = ChromaSampling::Cs420;
+        enc.time_base = Rational {
+            num: stream_info.time_base.0 as u64,
+            den: stream_info.time_base.1 as u64,
+        };
+        // Bitrate mode if the user specified one; otherwise leave 0 (quantizer mode).
+        if let Some(bitrate_bps) = stream_info.bitrate {
+            // EncoderConfig.bitrate is i32 bits per second. Cap to i32::MAX to be safe.
+            enc.bitrate = bitrate_bps.min(i32::MAX as u64) as i32;
+        }
+        // Sane SpeedSettings preset 6 default is already applied via with_speed_preset.
+        let _ = SpeedSettings::from_preset(6);
+
+        let cfg = Rav1eConfig::new().with_encoder_config(enc);
+
+        let ctx = if bit_depth == 8 {
+            Rav1eVariant::Eight(
+                cfg.new_context::<u8>()
+                    .map_err(|e| Error::Encode(format!("rav1e new_context (8-bit): {:?}", e)))?,
+            )
+        } else {
+            Rav1eVariant::Ten(
+                cfg.new_context::<u16>()
+                    .map_err(|e| Error::Encode(format!("rav1e new_context (10-bit): {:?}", e)))?,
+            )
+        };
+
+        Ok(Self {
+            stream_info,
+            ctx,
+            bit_depth,
+            next_input_frameno: 0,
+            pts_queue: VecDeque::new(),
+            buffered_packets: VecDeque::new(),
+            flushed: false,
+        })
+    }
+
+    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
+        stream_info.bitrate = Some(bitrate);
+        Self::new(stream_info)
+    }
+
+    /// Returns the AV1 sequence header in the format expected by ISOBMFF
+    /// (`av1C` box) and Matroska (`CodecPrivate`). Useful for muxers that
+    /// need to write the codec config record.
+    pub fn codec_config(&self) -> Vec<u8> {
+        match &self.ctx {
+            Rav1eVariant::Eight(c) => c.container_sequence_header(),
+            Rav1eVariant::Ten(c) => c.container_sequence_header(),
+        }
+    }
+
+    /// Drain all packets currently available from rav1e into `buffered_packets`.
+    fn drain_packets(&mut self) -> Result<()> {
+        loop {
+            let result = match &mut self.ctx {
+                Rav1eVariant::Eight(c) => match c.receive_packet() {
+                    Ok(pkt) => Ok((pkt.input_frameno, pkt.frame_type, pkt.data)),
+                    Err(e) => Err(e),
+                },
+                Rav1eVariant::Ten(c) => match c.receive_packet() {
+                    Ok(pkt) => Ok((pkt.input_frameno, pkt.frame_type, pkt.data)),
+                    Err(e) => Err(e),
+                },
+            };
+            match result {
+                Ok((input_frameno, frame_type, data)) => {
+                    let pts = self.pts_queue.pop_front().flatten();
+                    let mut pkt = Packet::new(data, 0, MediaType::Video);
+                    // Fall back to the input frame number if no PTS was provided.
+                    pkt.set_pts(Some(pts.unwrap_or(input_frameno as i64)));
+                    if matches!(frame_type, Rav1eFrameType::KEY) {
+                        pkt.set_keyframe(true);
+                    }
+                    self.buffered_packets.push_back(pkt);
+                }
+                Err(EncoderStatus::NeedMoreData) => break,
+                Err(EncoderStatus::Encoded) => continue,
+                Err(EncoderStatus::LimitReached) => {
+                    // Flush completed
+                    break;
+                }
+                Err(e) => {
+                    return Err(Error::Encode(format!("rav1e receive_packet: {:?}", e)));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Encoder for Av1Encoder {
+    fn codec(&self) -> &str {
+        "av1"
+    }
+
+    fn stream_info(&self) -> &StreamInfo {
+        &self.stream_info
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        if frame.media_type() != MediaType::Video {
+            return Err(Error::InvalidData(format!(
+                "Expected video frame, got {:?}",
+                frame.media_type()
+            )));
+        }
+
+        let frame_params = match frame.params() {
+            FrameParams::Video(p) => p,
+            _ => {
+                return Err(Error::InvalidData(
+                    "AV1 encoder requires video frame parameters".into(),
+                ))
+            }
+        };
+
+        // Verify the frame's bit depth matches what we were configured for —
+        // mixing 8-bit and 10-bit frames in one stream isn't supported because
+        // the rav1e Context is generic over the pixel storage type.
+        let frame_is_10bit = frame_params.format == PixelFormat::YUV420P10LE;
+        let frame_is_8bit = frame_params.format == PixelFormat::YUV420P;
+        if !frame_is_8bit && !frame_is_10bit {
+            return Err(Error::Unsupported(format!(
+                "AV1 encoder: unsupported pixel format {:?}",
+                frame_params.format
+            )));
+        }
+        match (self.bit_depth, frame_is_10bit) {
+            (8, false) | (10, true) => {}
+            _ => {
+                return Err(Error::InvalidData(format!(
+                    "AV1 encoder bit depth mismatch: encoder is {}-bit, frame is {}",
+                    self.bit_depth,
+                    if frame_is_10bit { "10-bit" } else { "8-bit" }
+                )));
+            }
+        }
+
+        let width = frame_params.width;
+        let height = frame_params.height;
+        let bytes_per_sample = if self.bit_depth == 8 { 1 } else { 2 };
+
+        let y_plane = frame.plane(0).ok_or_else(|| {
+            Error::InvalidData("AV1 encoder: missing Y plane".into())
+        })?;
+        let u_plane = frame.plane(1).ok_or_else(|| {
+            Error::InvalidData("AV1 encoder: missing U plane".into())
+        })?;
+        let v_plane = frame.plane(2).ok_or_else(|| {
+            Error::InvalidData("AV1 encoder: missing V plane".into())
+        })?;
+
+        let y_stride = width * bytes_per_sample;
+        let uv_stride = (width / 2) * bytes_per_sample;
+
+        // Build the rav1e frame and copy planes in.
+        let send_result = match &mut self.ctx {
+            Rav1eVariant::Eight(c) => {
+                let mut rf = c.new_frame();
+                rf.planes[0].copy_from_raw_u8(y_plane, y_stride, bytes_per_sample);
+                rf.planes[1].copy_from_raw_u8(u_plane, uv_stride, bytes_per_sample);
+                rf.planes[2].copy_from_raw_u8(v_plane, uv_stride, bytes_per_sample);
+                c.send_frame(Arc::new(rf))
+            }
+            Rav1eVariant::Ten(c) => {
+                let mut rf = c.new_frame();
+                rf.planes[0].copy_from_raw_u8(y_plane, y_stride, bytes_per_sample);
+                rf.planes[1].copy_from_raw_u8(u_plane, uv_stride, bytes_per_sample);
+                rf.planes[2].copy_from_raw_u8(v_plane, uv_stride, bytes_per_sample);
+                c.send_frame(Arc::new(rf))
+            }
+        };
+        send_result.map_err(|e| Error::Encode(format!("rav1e send_frame: {:?}", e)))?;
+
+        // Track the PTS for the frame we just sent so we can attach it to the
+        // matching output packet later.
+        self.pts_queue
+            .push_back(Some(frame.pts().unwrap_or(self.next_input_frameno as i64)));
+        self.next_input_frameno += 1;
+
+        // Try to drain any packets that became ready.
+        self.drain_packets()?;
+
+        let _ = (width, height); // currently unused after copy; kept for clarity
+        Ok(())
+    }
+
+    fn receive_packet(&mut self) -> Result<Packet> {
+        if let Some(p) = self.buffered_packets.pop_front() {
+            return Ok(p);
+        }
+        // Try one more drain in case the encoder has packets ready since
+        // the last send_frame call.
+        self.drain_packets()?;
+        if let Some(p) = self.buffered_packets.pop_front() {
+            return Ok(p);
+        }
+        if self.flushed {
+            Err(Error::EndOfStream)
+        } else {
+            Err(Error::NeedMoreData)
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // rav1e flush() is `send_frame(None)` which signals end-of-stream.
+        match &mut self.ctx {
+            Rav1eVariant::Eight(c) => c.flush(),
+            Rav1eVariant::Ten(c) => c.flush(),
+        }
+        // Drain remaining packets after flush.
+        self.drain_packets()?;
+        self.flushed = true;
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        // rav1e doesn't support reset on an existing context — the user has to
+        // build a new encoder. We can at least clear our buffered state.
+        self.pts_queue.clear();
+        self.buffered_packets.clear();
+        self.next_input_frameno = 0;
         self.flushed = false;
         Ok(())
     }
