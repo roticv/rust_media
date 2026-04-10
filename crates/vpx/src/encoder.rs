@@ -49,6 +49,11 @@ pub enum RateControl {
     VBR(u32),
     /// Constant bitrate (kbps).
     CBR(u32),
+    /// Constrained quality: bitrate cap (kbps) with quality target (cq_level).
+    CQ { kbps: u32, cq_level: u32 },
+    /// Pure quantizer mode (no bitrate target). Quality controlled via
+    /// `rc_min_quantizer`/`rc_max_quantizer` in `EncoderConfig`.
+    Q,
 }
 
 /// Encoder configuration.
@@ -59,6 +64,25 @@ pub struct EncoderConfig {
     pub timebase_num: u32,
     pub timebase_den: u32,
     pub rate_control: RateControl,
+    /// Maximum keyframe interval in frames. `None` uses the libvpx default.
+    pub kf_max_dist: Option<u32>,
+    /// Minimum keyframe interval in frames. `None` uses the libvpx default.
+    pub kf_min_dist: Option<u32>,
+    /// Encoding thread count. `None` uses the libvpx default (auto).
+    pub threads: Option<u32>,
+    /// Speed / cpu-used control. Applied after encoder init via
+    /// `VP8E_SET_CPUUSED`. Range depends on codec and deadline:
+    /// VP8: -16..16, VP9 good: 0..9, VP9 realtime: 0..15.
+    /// `None` uses the libvpx default.
+    pub cpu_used: Option<i32>,
+    /// Horizontal tile columns (log2). VP9 only; ignored for VP8.
+    pub tile_columns: Option<i32>,
+    /// Vertical tile rows (log2). VP9 only; ignored for VP8.
+    pub tile_rows: Option<i32>,
+    /// Minimum quantizer (0..63). `None` uses the libvpx default.
+    pub rc_min_quantizer: Option<u32>,
+    /// Maximum quantizer (0..63). `None` uses the libvpx default.
+    pub rc_max_quantizer: Option<u32>,
 }
 
 /// A compressed output packet from the encoder.
@@ -100,6 +124,29 @@ impl Encoder {
                 cfg.rc_end_usage = vpx_sys::vpx_rc_mode_VPX_CBR;
                 cfg.rc_target_bitrate = kbps;
             }
+            RateControl::CQ { kbps, .. } => {
+                cfg.rc_end_usage = vpx_sys::vpx_rc_mode_VPX_CQ;
+                cfg.rc_target_bitrate = kbps;
+            }
+            RateControl::Q => {
+                cfg.rc_end_usage = vpx_sys::vpx_rc_mode_VPX_Q;
+            }
+        }
+
+        if let Some(max) = config.kf_max_dist {
+            cfg.kf_max_dist = max;
+        }
+        if let Some(min) = config.kf_min_dist {
+            cfg.kf_min_dist = min;
+        }
+        if let Some(threads) = config.threads {
+            cfg.g_threads = threads;
+        }
+        if let Some(min_q) = config.rc_min_quantizer {
+            cfg.rc_min_quantizer = min_q;
+        }
+        if let Some(max_q) = config.rc_max_quantizer {
+            cfg.rc_max_quantizer = max_q;
         }
 
         let mut ctx =
@@ -114,6 +161,53 @@ impl Encoder {
             )
         };
         error::check(status, Some(&ctx))?;
+
+        // Apply post-init controls
+        if let Some(cpu_used) = config.cpu_used {
+            let status = unsafe {
+                vpx_sys::vpx_codec_control_(
+                    &mut ctx,
+                    vpx_sys::vp8e_enc_control_id_VP8E_SET_CPUUSED as i32,
+                    cpu_used,
+                )
+            };
+            error::check(status, Some(&ctx))?;
+        }
+
+        if let RateControl::CQ { cq_level, .. } = config.rate_control {
+            let status = unsafe {
+                vpx_sys::vpx_codec_control_(
+                    &mut ctx,
+                    vpx_sys::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL as i32,
+                    cq_level as i32,
+                )
+            };
+            error::check(status, Some(&ctx))?;
+        }
+
+        // VP9-only tile controls
+        if matches!(config.codec, Codec::VP9) {
+            if let Some(cols) = config.tile_columns {
+                let status = unsafe {
+                    vpx_sys::vpx_codec_control_(
+                        &mut ctx,
+                        vpx_sys::vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS as i32,
+                        cols,
+                    )
+                };
+                error::check(status, Some(&ctx))?;
+            }
+            if let Some(rows) = config.tile_rows {
+                let status = unsafe {
+                    vpx_sys::vpx_codec_control_(
+                        &mut ctx,
+                        vpx_sys::vp8e_enc_control_id_VP9E_SET_TILE_ROWS as i32,
+                        rows,
+                    )
+                };
+                error::check(status, Some(&ctx))?;
+            }
+        }
 
         Ok(Self {
             ctx,

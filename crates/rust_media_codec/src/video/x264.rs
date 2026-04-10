@@ -42,6 +42,89 @@ use rust_media_core::{
 use rust_media_core::frame::FrameParams;
 use x264::{Colorspace, Encoder as X264EncoderInner, Image, Plane, Preset, Setup, Tune};
 
+/// x264 speed preset (maps to x264 presets ultrafast..placebo).
+///
+/// The numeric value 0..9 maps to:
+/// 0 = ultrafast, 1 = superfast, 2 = veryfast, 3 = faster, 4 = fast,
+/// 5 = medium, 6 = slow, 7 = slower, 8 = veryslow, 9 = placebo.
+fn speed_to_preset(speed: u8) -> Preset {
+    match speed {
+        0 => Preset::Ultrafast,
+        1 => Preset::Superfast,
+        2 => Preset::Veryfast,
+        3 => Preset::Faster,
+        4 => Preset::Fast,
+        5 => Preset::Medium,
+        6 => Preset::Slow,
+        7 => Preset::Slower,
+        8 => Preset::Veryslow,
+        _ => Preset::Placebo,
+    }
+}
+
+/// H.264 encoder configuration with builder pattern.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let config = X264EncoderConfig::new()
+///     .speed(3)     // "faster" preset
+///     .crf(23.0)
+///     .gop_size(250);
+/// let encoder = X264Encoder::with_config(stream_info, config)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct X264EncoderConfig {
+    /// Speed preset 0..9 (0 = ultrafast, 5 = medium, 9 = placebo).
+    /// Default: 5 (medium).
+    pub speed: u8,
+    /// CRF (Constant Rate Factor) quality value. Lower = better quality.
+    /// Typical range 18..28. When set, bitrate is used as a VBV cap.
+    /// Default: None (uses bitrate-based ABR instead).
+    pub crf: Option<f32>,
+    /// Maximum keyframe interval in frames. Default: 250.
+    pub gop_size: u32,
+    /// Minimum keyframe interval in frames. Default: x264 auto.
+    pub keyint_min: Option<u32>,
+}
+
+impl Default for X264EncoderConfig {
+    fn default() -> Self {
+        Self {
+            speed: 5,
+            crf: None,
+            gop_size: 250,
+            keyint_min: None,
+        }
+    }
+}
+
+impl X264EncoderConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn speed(mut self, v: u8) -> Self {
+        self.speed = v.min(9);
+        self
+    }
+
+    pub fn crf(mut self, v: f32) -> Self {
+        self.crf = Some(v);
+        self
+    }
+
+    pub fn gop_size(mut self, v: u32) -> Self {
+        self.gop_size = v;
+        self
+    }
+
+    pub fn keyint_min(mut self, v: u32) -> Self {
+        self.keyint_min = Some(v);
+        self
+    }
+}
+
 /// H.264/AVC video encoder using x264
 ///
 /// This encoder is only available when the `gpl-x264` feature is enabled.
@@ -82,6 +165,10 @@ pub struct X264Encoder {
     buffered_packets: Vec<Packet>,
     flushed: bool,
     headers_emitted: bool,
+    /// Cached avcC (AVCDecoderConfigurationRecord) built from SPS/PPS at
+    /// construction time. Used by `codec_config()` so muxers can write the
+    /// `avcC` box before any frames are encoded.
+    avcc_record: Vec<u8>,
 }
 
 impl X264Encoder {
@@ -97,7 +184,19 @@ impl X264Encoder {
     /// - Codec is not "h264" or "avc"
     /// - Stream params are not video
     /// - x264 encoder creation fails
+    /// Create with default config. Honors `stream_info.bitrate` if set.
     pub fn new(stream_info: StreamInfo) -> Result<Self> {
+        Self::with_config(stream_info, X264EncoderConfig::default())
+    }
+
+    /// Creates an H.264 encoder with custom bitrate
+    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
+        stream_info.bitrate = Some(bitrate);
+        Self::new(stream_info)
+    }
+
+    /// Create with explicit configuration.
+    pub fn with_config(stream_info: StreamInfo, config: X264EncoderConfig) -> Result<Self> {
         // Validate codec
         if stream_info.codec != "h264" && stream_info.codec != "avc" {
             return Err(Error::Unsupported(format!(
@@ -123,22 +222,32 @@ impl X264Encoder {
         let bitrate_kbps = (stream_info.bitrate.unwrap_or(2_000_000) / 1000) as i32;
 
         // Calculate frame rate from time_base
-        // time_base is (num, den) where pts * num / den = seconds
-        // For fps, we want den / num (inverted)
         let (tb_num, tb_den) = stream_info.time_base;
         let fps_num = tb_den;
         let fps_den = tb_num;
 
+        let preset = speed_to_preset(config.speed);
+
         // Create encoder using builder pattern
-        let encoder = Setup::preset(Preset::Medium, Tune::None, false, false)
+        let mut setup = Setup::preset(preset, Tune::None, false, false)
             .fps(fps_num, fps_den)
             .timebase(tb_num, tb_den)
             .bitrate(bitrate_kbps)
-            .max_keyframe_interval(250) // ~10 seconds at 25fps
-            .annexb(true) // Use Annex B format (start codes)
-            .high() // Use high profile for best quality
+            .max_keyframe_interval(config.gop_size as i32)
+            .annexb(true)
+            .high();
+
+        if let Some(min) = config.keyint_min {
+            setup = setup.min_keyframe_interval(min as i32);
+        }
+
+        let mut encoder = setup
             .build(Colorspace::I420, width, height)
             .map_err(|e| Error::Encode(format!("Failed to create x264 encoder: {:?}", e)))?;
+
+        // Build avcC record from SPS/PPS headers. The headers are fully
+        // determined by the encoder config and available immediately.
+        let avcc_record = Self::build_avcc_from_encoder(&mut encoder)?;
 
         Ok(Self {
             stream_info,
@@ -149,18 +258,86 @@ impl X264Encoder {
             buffered_packets: Vec::new(),
             flushed: false,
             headers_emitted: false,
+            avcc_record,
         })
     }
 
-    /// Creates an H.264 encoder with custom bitrate
+    /// Returns the avcC (AVCDecoderConfigurationRecord) for container muxing.
     ///
-    /// # Arguments
-    ///
-    /// * `stream_info` - Stream configuration
-    /// * `bitrate` - Target bitrate in bits per second
-    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
-        stream_info.bitrate = Some(bitrate);
-        Self::new(stream_info)
+    /// The record is built from the encoder's SPS/PPS headers at construction
+    /// time, so it can be called before any frames are sent. The bytes are
+    /// suitable for the MP4 `avcC` box or MKV CodecPrivate.
+    pub fn codec_config(&self) -> &[u8] {
+        &self.avcc_record
+    }
+
+    /// Extract SPS/PPS NAL units from the x264 encoder headers and build an
+    /// AVCDecoderConfigurationRecord (avcC).
+    fn build_avcc_from_encoder(encoder: &mut X264EncoderInner) -> Result<Vec<u8>> {
+        let headers = encoder
+            .headers()
+            .map_err(|e| Error::Encode(format!("Failed to get x264 headers: {:?}", e)))?;
+
+        let mut sps_list: Vec<Vec<u8>> = Vec::new();
+        let mut pps_list: Vec<Vec<u8>> = Vec::new();
+
+        for i in 0..headers.len() {
+            let unit = headers.unit(i);
+            let payload: &[u8] = unit.as_ref();
+
+            // Strip Annex B start code (00 00 00 01 or 00 00 01)
+            let nal = if payload.starts_with(&[0, 0, 0, 1]) {
+                &payload[4..]
+            } else if payload.starts_with(&[0, 0, 1]) {
+                &payload[3..]
+            } else {
+                payload
+            };
+
+            if nal.is_empty() {
+                continue;
+            }
+
+            match nal[0] & 0x1F {
+                7 => sps_list.push(nal.to_vec()), // SPS
+                8 => pps_list.push(nal.to_vec()), // PPS
+                _ => {}
+            }
+        }
+
+        if sps_list.is_empty() {
+            return Err(Error::Encode(
+                "x264 encoder produced no SPS in headers".to_string(),
+            ));
+        }
+
+        let sps = &sps_list[0];
+        if sps.len() < 4 {
+            return Err(Error::Encode("SPS too short for avcC".to_string()));
+        }
+
+        // Build AVCDecoderConfigurationRecord
+        let mut avcc = vec![
+            1,      // configurationVersion
+            sps[1], // AVCProfileIndication
+            sps[2], // profile_compatibility
+            sps[3], // AVCLevelIndication
+            0xFF,   // reserved(6 bits) + lengthSizeMinusOne(2 bits) = 3 → 4-byte lengths
+            0xE0 | (sps_list.len() as u8), // reserved(3 bits) + numOfSequenceParameterSets
+        ];
+        for s in &sps_list {
+            let len = s.len() as u16;
+            avcc.extend_from_slice(&len.to_be_bytes());
+            avcc.extend_from_slice(s);
+        }
+        avcc.push(pps_list.len() as u8); // numOfPictureParameterSets
+        for p in &pps_list {
+            let len = p.len() as u16;
+            avcc.extend_from_slice(&len.to_be_bytes());
+            avcc.extend_from_slice(p);
+        }
+
+        Ok(avcc)
     }
 
     /// Emits SPS/PPS headers as the first packet if not already done

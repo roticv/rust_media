@@ -64,6 +64,8 @@ fn generate_bindings(include_path: &std::path::Path) {
         .clang_arg(format!("-I{}", include_path.display()))
         .allowlist_function("vpx_.*")
         .allowlist_type("vpx_.*")
+        .allowlist_type("vp8e_enc_control_id")
+        .allowlist_type("vp9e_enc_control_id")
         .allowlist_var("VPX_.*")
         .allowlist_var("VP8.*")
         .allowlist_var("VP9.*")

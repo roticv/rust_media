@@ -1060,22 +1060,32 @@ fn transcode_to_mp4(
             // The encoder pixel format follows the input bit depth (10-bit for
             // YUV420P10LE, 8-bit otherwise), matching what create_video_encoder
             // will use later.
-            if (out_codec == "av1" || out_codec == "av01") && video_codec != "copy" {
-                let av1c = build_av1_codec_config(vs, video_bitrate, encoder_opts)?;
-                out_stream.extra_data = av1c;
-                // Reflect 10-bit in the muxer's StreamParams so info readers
-                // see the correct bit_depth field.
-                if let StreamParams::Video(ref mut vp) = out_stream.params {
-                    if matches!(
-                        vs.params,
-                        StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
-                    ) {
-                        vp.pixel_format = PixelFormat::YUV420P10LE;
-                        vp.bit_depth = 10;
-                    } else {
-                        vp.pixel_format = PixelFormat::YUV420P;
-                        vp.bit_depth = 8;
+            if video_codec != "copy" {
+                if out_codec == "av1" || out_codec == "av01" {
+                    let av1c = build_av1_codec_config(vs, video_bitrate, encoder_opts)?;
+                    out_stream.extra_data = av1c;
+                    // Reflect 10-bit in the muxer's StreamParams so info readers
+                    // see the correct bit_depth field.
+                    if let StreamParams::Video(ref mut vp) = out_stream.params {
+                        if matches!(
+                            vs.params,
+                            StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
+                        ) {
+                            vp.pixel_format = PixelFormat::YUV420P10LE;
+                            vp.bit_depth = 10;
+                        } else {
+                            vp.pixel_format = PixelFormat::YUV420P;
+                            vp.bit_depth = 8;
+                        }
                     }
+                } else if out_codec == "vp9" {
+                    let vpcc = build_vp9_codec_config(vs, video_bitrate)?;
+                    out_stream.extra_data = vpcc;
+                }
+                #[cfg(feature = "gpl-x264")]
+                if out_codec == "h264" || out_codec == "avc" {
+                    let avcc = build_h264_codec_config(vs, video_bitrate)?;
+                    out_stream.extra_data = avcc;
                 }
             }
             muxer.add_stream(out_stream)?;
@@ -1213,23 +1223,28 @@ fn transcode_to_webm(
                     vp.height = sf.target_height();
                 }
             }
-            // For AV1, pre-build the rav1e encoder to extract the sequence
-            // header (CodecPrivate for Matroska/WebM has the same layout as
-            // av1C for ISOBMFF). Also propagate the 10-bit format flag.
-            if (out_codec == "av1" || out_codec == "av01") && video_codec != "copy" {
-                let av1c = build_av1_codec_config(vs, video_bitrate, encoder_opts)?;
-                out_stream.extra_data = av1c;
-                if let StreamParams::Video(ref mut vp) = out_stream.params {
-                    if matches!(
-                        vs.params,
-                        StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
-                    ) {
-                        vp.pixel_format = PixelFormat::YUV420P10LE;
-                        vp.bit_depth = 10;
-                    } else {
-                        vp.pixel_format = PixelFormat::YUV420P;
-                        vp.bit_depth = 8;
+            // Pre-build codec config records for containers that need them.
+            // CodecPrivate for Matroska/WebM uses the same layout as the
+            // ISOBMFF config boxes (av1C, vpcC).
+            if video_codec != "copy" {
+                if out_codec == "av1" || out_codec == "av01" {
+                    let av1c = build_av1_codec_config(vs, video_bitrate, encoder_opts)?;
+                    out_stream.extra_data = av1c;
+                    if let StreamParams::Video(ref mut vp) = out_stream.params {
+                        if matches!(
+                            vs.params,
+                            StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
+                        ) {
+                            vp.pixel_format = PixelFormat::YUV420P10LE;
+                            vp.bit_depth = 10;
+                        } else {
+                            vp.pixel_format = PixelFormat::YUV420P;
+                            vp.bit_depth = 8;
+                        }
                     }
+                } else if out_codec == "vp9" {
+                    let vpcc = build_vp9_codec_config(vs, video_bitrate)?;
+                    out_stream.extra_data = vpcc;
                 }
             }
             muxer.add_stream(out_stream)?;
@@ -2085,6 +2100,75 @@ fn create_decoder_for_stream(
 /// applied **only if `opts.qp` is not set**, matching FFmpeg's behavior
 /// where `-qp` puts the encoder into constant-quality mode and overrides
 /// `-b:v`.
+fn build_vp8_config_from_opts(bitrate: u64, opts: &EncoderOptions) -> rust_media_codec::Vp8EncoderConfig {
+    let mut cfg = rust_media_codec::Vp8EncoderConfig::new();
+    if let Some(speed) = opts.speed {
+        cfg = cfg.speed(speed as i32);
+    }
+    if let Some(qp) = opts.qp {
+        // Map --qp to CQ mode with the bitrate as a cap
+        cfg = cfg.rate_control(rust_media_codec::Vp8RateControl::CQ {
+            bitrate: bitrate as u32,
+            cq_level: qp as u32,
+        });
+    } else if bitrate > 0 {
+        cfg = cfg.rate_control(rust_media_codec::Vp8RateControl::VBR(bitrate as u32));
+    }
+    if let Some(gop) = opts.gop_size {
+        cfg = cfg.gop_size(gop as u32);
+    }
+    if let Some(min) = opts.keyint_min {
+        cfg = cfg.keyint_min(min as u32);
+    }
+    cfg
+}
+
+fn build_vp9_config_from_opts(bitrate: u64, opts: &EncoderOptions) -> rust_media_codec::Vp9EncoderConfig {
+    let mut cfg = rust_media_codec::Vp9EncoderConfig::new();
+    if let Some(speed) = opts.speed {
+        cfg = cfg.speed(speed as i32);
+    }
+    if let Some(qp) = opts.qp {
+        cfg = cfg.rate_control(rust_media_codec::Vp9RateControl::CQ {
+            bitrate: bitrate as u32,
+            cq_level: qp as u32,
+        });
+    } else if bitrate > 0 {
+        cfg = cfg.rate_control(rust_media_codec::Vp9RateControl::VBR(bitrate as u32));
+    }
+    if let Some(gop) = opts.gop_size {
+        cfg = cfg.gop_size(gop as u32);
+    }
+    if let Some(min) = opts.keyint_min {
+        cfg = cfg.keyint_min(min as u32);
+    }
+    if let Some(n) = opts.tile_columns {
+        cfg = cfg.tile_columns(n as i32);
+    }
+    if let Some(n) = opts.tile_rows {
+        cfg = cfg.tile_rows(n as i32);
+    }
+    cfg
+}
+
+#[cfg(feature = "gpl-x264")]
+fn build_x264_config_from_opts(opts: &EncoderOptions) -> rust_media_codec::X264EncoderConfig {
+    let mut cfg = rust_media_codec::X264EncoderConfig::new();
+    if let Some(speed) = opts.speed {
+        cfg = cfg.speed(speed);
+    }
+    if let Some(qp) = opts.qp {
+        cfg = cfg.crf(qp as f32);
+    }
+    if let Some(gop) = opts.gop_size {
+        cfg = cfg.gop_size(gop as u32);
+    }
+    if let Some(min) = opts.keyint_min {
+        cfg = cfg.keyint_min(min as u32);
+    }
+    cfg
+}
+
 fn build_av1_config_from_opts(bitrate: u64, opts: &EncoderOptions) -> rust_media_codec::Av1EncoderConfig {
     let mut cfg = rust_media_codec::Av1EncoderConfig::new();
     if let Some(speed) = opts.speed {
@@ -2150,6 +2234,47 @@ fn build_av1_codec_config(
     Ok(encoder.codec_config())
 }
 
+/// Build the VP9 codec configuration record (vpcC payload) for a given
+/// input stream by spinning up a throwaway VP9 encoder.
+fn build_vp9_codec_config(
+    input_stream: &StreamInfo,
+    bitrate: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (width, height, frame_rate) = match &input_stream.params {
+        StreamParams::Video(p) => (p.width, p.height, p.frame_rate),
+        _ => return Err("vp9 codec config: not a video stream".into()),
+    };
+    let video_params = VideoStreamParams::new(width, height, PixelFormat::YUV420P)
+        .with_frame_rate(frame_rate.0, frame_rate.1);
+    let stream_info = StreamInfo::new(0, MediaType::Video, "vp9".to_string())
+        .with_params(StreamParams::Video(video_params))
+        .with_bitrate(bitrate)
+        .with_time_base(input_stream.time_base.0, input_stream.time_base.1);
+    let encoder = rust_media_codec::Vp9Encoder::new(stream_info)?;
+    Ok(encoder.codec_config())
+}
+
+/// Build the H.264 avcC (AVCDecoderConfigurationRecord) for a given input
+/// stream by spinning up a throwaway x264 encoder.
+#[cfg(feature = "gpl-x264")]
+fn build_h264_codec_config(
+    input_stream: &StreamInfo,
+    bitrate: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (width, height, frame_rate) = match &input_stream.params {
+        StreamParams::Video(p) => (p.width, p.height, p.frame_rate),
+        _ => return Err("h264 codec config: not a video stream".into()),
+    };
+    let video_params = VideoStreamParams::new(width, height, PixelFormat::YUV420P)
+        .with_frame_rate(frame_rate.0, frame_rate.1);
+    let stream_info = StreamInfo::new(0, MediaType::Video, "h264".to_string())
+        .with_params(StreamParams::Video(video_params))
+        .with_bitrate(bitrate)
+        .with_time_base(input_stream.time_base.0, input_stream.time_base.1);
+    let encoder = rust_media_codec::X264Encoder::new(stream_info)?;
+    Ok(encoder.codec_config().to_vec())
+}
+
 fn create_video_encoder(
     input_stream: &StreamInfo,
     codec: &str,
@@ -2189,11 +2314,13 @@ fn create_video_encoder(
 
     match codec {
         "vp8" => {
-            let encoder = rust_media_codec::Vp8Encoder::new(stream_info)?;
+            let vp8_config = build_vp8_config_from_opts(bitrate, encoder_opts);
+            let encoder = rust_media_codec::Vp8Encoder::with_config(stream_info, vp8_config)?;
             Ok(Box::new(encoder))
         }
         "vp9" => {
-            let encoder = rust_media_codec::Vp9Encoder::new(stream_info)?;
+            let vp9_config = build_vp9_config_from_opts(bitrate, encoder_opts);
+            let encoder = rust_media_codec::Vp9Encoder::with_config(stream_info, vp9_config)?;
             Ok(Box::new(encoder))
         }
         "av1" | "av01" => {
@@ -2209,7 +2336,8 @@ fn create_video_encoder(
         }
         #[cfg(feature = "gpl-x264")]
         "h264" => {
-            let encoder = rust_media_codec::X264Encoder::new(stream_info)?;
+            let x264_config = build_x264_config_from_opts(encoder_opts);
+            let encoder = rust_media_codec::X264Encoder::with_config(stream_info, x264_config)?;
             Ok(Box::new(encoder))
         }
         _ => Err(format!("No encoder available for video codec: {}", codec).into()),

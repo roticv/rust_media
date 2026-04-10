@@ -40,12 +40,12 @@ pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
 pub use video::av1::{Av1Decoder, Av1Encoder, Av1EncoderConfig, Av1RateControl};
 pub use video::h264::H264Decoder;
-pub use video::vp8::{Vp8Decoder, Vp8Encoder};
-pub use video::vp9::{Vp9Decoder, Vp9Encoder};
+pub use video::vp8::{Vp8Decoder, Vp8Encoder, Vp8EncoderConfig, Vp8RateControl};
+pub use video::vp9::{Vp9Decoder, Vp9Encoder, Vp9EncoderConfig, Vp9RateControl};
 
 // Optional feature codecs
 #[cfg(feature = "gpl-x264")]
-pub use video::x264::X264Encoder;
+pub use video::x264::{X264Encoder, X264EncoderConfig};
 
 #[cfg(feature = "fdk-aac")]
 pub use audio::fdk_aac::{FdkAacDecoder, FdkAacEncoder};

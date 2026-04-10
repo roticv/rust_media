@@ -101,6 +101,92 @@ impl Decoder for Vp8Decoder {
     fn is_flushed(&self) -> bool { self.flushed }
 }
 
+/// VP8 rate control mode.
+#[derive(Debug, Clone, Copy)]
+pub enum Vp8RateControl {
+    /// Variable bitrate (bits per second).
+    VBR(u32),
+    /// Constant bitrate (bits per second).
+    CBR(u32),
+    /// Constrained quality: bitrate cap (bps) with quality target (0..63,
+    /// lower = better).
+    CQ { bitrate: u32, cq_level: u32 },
+    /// Pure quantizer mode (no bitrate target). Quality controlled via
+    /// `min_quantizer`/`max_quantizer`.
+    Q,
+}
+
+/// VP8 encoder configuration with builder pattern.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let config = Vp8EncoderConfig::new()
+///     .speed(4)
+///     .rate_control(Vp8RateControl::VBR(2_000_000))
+///     .gop_size(120);
+/// let encoder = Vp8Encoder::with_config(stream_info, config)?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct Vp8EncoderConfig {
+    /// Speed / CPU usage. VP8 range: 0 (best quality) to 16 (fastest).
+    /// Default: libvpx default (0).
+    pub speed: Option<i32>,
+    /// Rate control mode. Default: VBR at 1 Mbps (or `stream_info.bitrate`).
+    pub rate_control: Option<Vp8RateControl>,
+    /// Maximum keyframe interval in frames. Default: libvpx default.
+    pub kf_max_dist: Option<u32>,
+    /// Minimum keyframe interval in frames. Default: libvpx default.
+    pub kf_min_dist: Option<u32>,
+    /// Minimum quantizer (0..63). Default: libvpx default.
+    pub min_quantizer: Option<u32>,
+    /// Maximum quantizer (0..63). Default: libvpx default.
+    pub max_quantizer: Option<u32>,
+    /// Encoding thread count. 0 = auto. Default: libvpx default.
+    pub threads: Option<u32>,
+}
+
+impl Vp8EncoderConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn speed(mut self, v: i32) -> Self {
+        self.speed = Some(v);
+        self
+    }
+
+    pub fn rate_control(mut self, rc: Vp8RateControl) -> Self {
+        self.rate_control = Some(rc);
+        self
+    }
+
+    pub fn gop_size(mut self, max: u32) -> Self {
+        self.kf_max_dist = Some(max);
+        self
+    }
+
+    pub fn keyint_min(mut self, min: u32) -> Self {
+        self.kf_min_dist = Some(min);
+        self
+    }
+
+    pub fn min_quantizer(mut self, q: u32) -> Self {
+        self.min_quantizer = Some(q);
+        self
+    }
+
+    pub fn max_quantizer(mut self, q: u32) -> Self {
+        self.max_quantizer = Some(q);
+        self
+    }
+
+    pub fn threads(mut self, n: u32) -> Self {
+        self.threads = Some(n);
+        self
+    }
+}
+
 /// VP8 video encoder
 pub struct Vp8Encoder {
     stream_info: StreamInfo,
@@ -111,7 +197,19 @@ pub struct Vp8Encoder {
 }
 
 impl Vp8Encoder {
+    /// Create with default config. Honors `stream_info.bitrate` if set.
     pub fn new(stream_info: StreamInfo) -> Result<Self> {
+        Self::with_config(stream_info, Vp8EncoderConfig::default())
+    }
+
+    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
+        stream_info.bitrate = Some(bitrate);
+        Self::new(stream_info)
+    }
+
+    /// Create with explicit configuration. Config values override
+    /// `stream_info.bitrate`.
+    pub fn with_config(stream_info: StreamInfo, config: Vp8EncoderConfig) -> Result<Self> {
         if stream_info.codec != "vp8" {
             return Err(Error::Unsupported(format!(
                 "Expected vp8 codec, got {}", stream_info.codec
@@ -125,18 +223,36 @@ impl Vp8Encoder {
             )),
         };
 
-        let bitrate_kbps = (stream_info.bitrate.unwrap_or(1_000_000) / 1000) as u32;
+        let default_bitrate_kbps = (stream_info.bitrate.unwrap_or(1_000_000) / 1000) as u32;
 
-        let config = EncoderConfig {
+        let rate_control = match config.rate_control {
+            Some(Vp8RateControl::VBR(bps)) => RateControl::VBR(bps / 1000),
+            Some(Vp8RateControl::CBR(bps)) => RateControl::CBR(bps / 1000),
+            Some(Vp8RateControl::CQ { bitrate, cq_level }) => {
+                RateControl::CQ { kbps: bitrate / 1000, cq_level }
+            }
+            Some(Vp8RateControl::Q) => RateControl::Q,
+            None => RateControl::VBR(default_bitrate_kbps),
+        };
+
+        let vpx_config = EncoderConfig {
             codec: Codec::VP8,
             width: video_params.width as u32,
             height: video_params.height as u32,
             timebase_num: stream_info.time_base.0,
             timebase_den: stream_info.time_base.1,
-            rate_control: RateControl::VBR(bitrate_kbps),
+            rate_control,
+            kf_max_dist: config.kf_max_dist,
+            kf_min_dist: config.kf_min_dist,
+            threads: config.threads,
+            cpu_used: config.speed,
+            tile_columns: None, // VP8 doesn't support tiles
+            tile_rows: None,
+            rc_min_quantizer: config.min_quantizer,
+            rc_max_quantizer: config.max_quantizer,
         };
 
-        let encoder = VpxEncoder::new(&config)
+        let encoder = VpxEncoder::new(&vpx_config)
             .map_err(|e| Error::Encode(format!("Failed to create VP8 encoder: {}", e)))?;
 
         Ok(Self {
@@ -145,9 +261,12 @@ impl Vp8Encoder {
         })
     }
 
-    pub fn with_bitrate(mut stream_info: StreamInfo, bitrate: u64) -> Result<Self> {
-        stream_info.bitrate = Some(bitrate);
-        Self::new(stream_info)
+    /// Returns the codec configuration record for container muxing.
+    ///
+    /// VP8 has no standard codec configuration record (no equivalent of
+    /// avcC, vpcC, or av1C), so this returns an empty vector.
+    pub fn codec_config(&self) -> Vec<u8> {
+        Vec::new()
     }
 }
 
