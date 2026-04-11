@@ -26,6 +26,8 @@ vpx = { path = "../vpx" }
 rust_h264 = "0.3.0"
 # minimp3 - MP3 decoder (MIT)
 minimp3 = "0.6"
+# lewton - Pure-Rust Vorbis decoder (BSD-3-Clause)
+lewton = "0.10"
 # dav1d - AV1 decoder (MIT bindings, BSD-2-Clause libdav1d)
 # Requires system libdav1d (brew install dav1d / apt-get install libdav1d-dev)
 dav1d = "0.11"

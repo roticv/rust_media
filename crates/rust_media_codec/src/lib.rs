@@ -16,7 +16,7 @@
 //! - **Opus** - ✅ Implemented (via libopus)
 //! - **AAC** - ✅ Encoder and decoder implemented (via libfdk-aac, requires `fdk-aac` feature)
 //! - **MP3** - ✅ Decoder implemented (via minimp3)
-//! - Vorbis (future)
+//! - **Vorbis** - ✅ Decoder implemented (via lewton, pure Rust, BSD-3-Clause)
 //! - FLAC (future)
 //!
 //! All implementations use streaming APIs for bounded memory usage.
@@ -38,6 +38,7 @@ pub mod video;
 pub use audio::mp3::Mp3Decoder;
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};
+pub use audio::vorbis::VorbisDecoder;
 pub use video::av1::{Av1Decoder, Av1Encoder, Av1EncoderConfig, Av1RateControl};
 pub use video::h264::H264Decoder;
 pub use video::vp8::{Vp8Decoder, Vp8Encoder, Vp8EncoderConfig, Vp8RateControl};
