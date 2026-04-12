@@ -17,7 +17,7 @@
 //! - **AAC** - ✅ Encoder and decoder implemented (via libfdk-aac, requires `fdk-aac` feature)
 //! - **MP3** - ✅ Decoder implemented (via minimp3)
 //! - **Vorbis** - ✅ Decoder implemented (via lewton, pure Rust, BSD-3-Clause)
-//! - FLAC (future)
+//! - **FLAC** - ✅ Decoder implemented (via claxon, pure Rust, Apache-2.0)
 //!
 //! All implementations use streaming APIs for bounded memory usage.
 //!
@@ -35,6 +35,7 @@ pub mod audio;
 pub mod video;
 
 // Re-export commonly used codecs
+pub use audio::flac::FlacDecoder;
 pub use audio::mp3::Mp3Decoder;
 pub use audio::opus::{OpusDecoder, OpusEncoder};
 pub use audio::pcm::{PcmDecoder, PcmEncoder};

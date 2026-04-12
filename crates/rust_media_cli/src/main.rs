@@ -2049,6 +2049,9 @@ fn create_decoder(stream: &StreamInfo) -> Option<Box<dyn DecoderWrapper>> {
         "vorbis" => rust_media_codec::VorbisDecoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
+        "flac" => rust_media_codec::FlacDecoder::new(stream.clone())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),
         "vp8" => rust_media_codec::Vp8Decoder::new(stream.clone())
             .ok()
             .map(|d| Box::new(d) as Box<dyn DecoderWrapper>),

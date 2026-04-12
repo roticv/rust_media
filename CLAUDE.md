@@ -14,7 +14,7 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
 - **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 decode ✅ (dav1d/BSD-2-Clause), AV1 encode ✅ (rav1e/BSD-2-Clause)
-- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), MP3 decode ✅ (minimp3/MIT), Vorbis decode ✅ (lewton/BSD-3-Clause); FLAC (claxon/Apache-2.0) planned
+- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), MP3 decode ✅ (minimp3/MIT), Vorbis decode ✅ (lewton/BSD-3-Clause), FLAC decode ✅ (claxon/Apache-2.0)
 
 ### Optional GPL Features
 
@@ -52,6 +52,7 @@ x264 = { version = "...", optional = true }
 | MP3 (decode) | minimp3 | MIT | *(default)* | ✅ Implemented |
 | AAC | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
 | Vorbis (decode) | lewton | BSD-3-Clause | *(default)* | ✅ Implemented |
+| FLAC (decode) | claxon | Apache-2.0 | *(default)* | ✅ Implemented |
 | PCM | *(native)* | N/A | *(default)* | ✅ Implemented |
 
 ### Why This Approach?
@@ -100,7 +101,7 @@ rust_media/
 │   │
 │   ├── rust_media_codec/   # Codec implementations
 │   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode, 8/10-bit), AV1 ✅ (dav1d decode + rav1e encode, 8/10-bit)
-│   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), Vorbis ✅ (decode, lewton), AAC ✅ (fdk-aac)
+│   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), Vorbis ✅ (decode, lewton), FLAC ✅ (decode, claxon), AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations
 │   │   ├── Video: scale ✅ (bilinear, 8-bit + 10-bit), crop ✅ (8-bit + 10-bit), SSIM ✅, format ✅ (10→8 bit); overlay, rotate (planned)
@@ -427,6 +428,13 @@ Implement Packet and Frame abstractions with support for various media types. Th
   - Maintains `PreviousWindowRight` state across packets for overlap-add windowing
   - Output: interleaved S16 PCM
   - Decode only (no encoder)
+- ✅ **FLAC**: FLAC decoding via claxon. **IMPLEMENTED** in `rust_media_codec/src/audio/flac.rs`
+  - Uses claxon crate (v0.4, Apache-2.0) - pure Rust, no external libraries
+  - Parses FLAC STREAMINFO from Matroska CodecPrivate (with or without `fLaC` marker)
+  - Uses claxon's `FrameReader` to decode individual FLAC frames from raw packet data
+  - Supports 8-32 bit depths (internally i32), output normalized to S16 PCM
+  - Supports any sample rate and channel count
+  - Decode only (no encoder)
 
 **Image Codecs** (for thumbnails, still images) - Priority:
 - JPEG
@@ -436,7 +444,6 @@ Implement Packet and Frame abstractions with support for various media types. Th
 
 **Possible Future Codec Support** (depending on requirements):
 - **H.265/HEVC encode**: Via x265 (GPL v2+), requires `gpl-x265` feature
-- **FLAC**: Lossless audio codec
 
 #### 4. Color Space and Bit Depth Handling 🚧 IN PROGRESS
 

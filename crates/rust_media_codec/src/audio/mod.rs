@@ -1,5 +1,6 @@
 //! Audio codec implementations
 
+pub mod flac;
 pub mod mp3;
 pub mod opus;
 pub mod pcm;

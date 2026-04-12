@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MKV ✅ demuxer, MP4 ✅ demuxer + muxer)
-- **Codec** support (PCM ✅, Opus ✅, Vorbis ✅ decode, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AV1 ✅ decode + encode, AAC ✅)
+- **Codec** support (PCM ✅, Opus ✅, Vorbis ✅ decode, FLAC ✅ decode, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AV1 ✅ decode + encode, AAC ✅)
 - **Filter** support (audio resampling ✅, volume ✅, video scale ✅, crop ✅, SSIM quality metric ✅)
 - **10-bit pixel format** support end-to-end (decode, scale, crop, with auto 10→8 conversion at encoder boundary)
 - **Format detection** from magic bytes with file extension fallback
@@ -116,6 +116,7 @@ This project is in active development. Current status:
 - ✅ **PCM** codec (decoder + encoder)
 - ✅ **Opus** codec (decoder + encoder)
 - ✅ **Vorbis** decoder (via lewton, pure Rust, BSD-3-Clause)
+- ✅ **FLAC** decoder (via claxon, pure Rust, Apache-2.0)
 - ✅ **MP3** decoder (via minimp3, MIT)
 - ✅ **VP8** codec (decoder + encoder via libvpx, configurable via `Vp8EncoderConfig`)
 - ✅ **VP9** codec (decoder + encoder via libvpx, configurable via `Vp9EncoderConfig`)
@@ -151,7 +152,7 @@ This project is in active development. Current status:
 - ✅ **transform** - Transcode media files (similar to ffmpeg)
   - Video transcoding (VP8, VP9, H.264, AV1)
   - Audio transcoding (Opus, AAC, PCM)
-  - Audio decoding (Vorbis, MP3, AAC, Opus, PCM)
+  - Audio decoding (Vorbis, FLAC, MP3, AAC, Opus, PCM)
   - Stream copy (passthrough)
   - Bitrate control
   - Encoder options: `--speed`, `--qp`, `-g` (GOP size), `--keyint-min`, `--tile-columns`, `--tile-rows` — work for all video encoders
