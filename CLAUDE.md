@@ -14,7 +14,7 @@ The project is **MIT licensed** by default, prioritizing permissively-licensed c
 
 All codecs in the default build use permissively-licensed libraries (MIT, BSD, Apache-2.0):
 - **Video**: VP8 ✅ (libvpx/BSD-3-Clause), VP9 ✅ (libvpx/BSD-3-Clause), H.264 decode ✅ (rust_h264/MIT), AV1 decode ✅ (dav1d/BSD-2-Clause), AV1 encode ✅ (rav1e/BSD-2-Clause)
-- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), MP3 decode ✅ (minimp3/MIT); Vorbis (lewton/MIT), FLAC (claxon/Apache-2.0) planned
+- **Audio**: PCM ✅, Opus ✅ (libopus/BSD-3-Clause), MP3 decode ✅ (minimp3/MIT), Vorbis decode ✅ (lewton/BSD-3-Clause); FLAC (claxon/Apache-2.0) planned
 
 ### Optional GPL Features
 
@@ -51,6 +51,7 @@ x264 = { version = "...", optional = true }
 | Opus | libopus | BSD-3-Clause | *(default)* | ✅ Implemented |
 | MP3 (decode) | minimp3 | MIT | *(default)* | ✅ Implemented |
 | AAC | libfdk-aac | FDK AAC License | `fdk-aac` | ✅ Implemented |
+| Vorbis (decode) | lewton | BSD-3-Clause | *(default)* | ✅ Implemented |
 | PCM | *(native)* | N/A | *(default)* | ✅ Implemented |
 
 ### Why This Approach?
@@ -99,7 +100,7 @@ rust_media/
 │   │
 │   ├── rust_media_codec/   # Codec implementations
 │   │   ├── Video: VP8 ✅, VP9 ✅, H.264 ✅ (rust_h264/VideoToolbox decode, x264 encode), H.265/HEVC ✅ (VideoToolbox decode, 8/10-bit), AV1 ✅ (dav1d decode + rav1e encode, 8/10-bit)
-│   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), AAC ✅ (fdk-aac)
+│   │   └── Audio: PCM ✅, Opus ✅, MP3 ✅ (decode, minimp3), Vorbis ✅ (decode, lewton), AAC ✅ (fdk-aac)
 │   │
 │   ├── rust_media_filter/  # Filter implementations
 │   │   ├── Video: scale ✅ (bilinear, 8-bit + 10-bit), crop ✅ (8-bit + 10-bit), SSIM ✅, format ✅ (10→8 bit); overlay, rotate (planned)
@@ -218,7 +219,7 @@ Both structures support:
 
 - **Codecs** (handled by decoders/encoders):
   - **Video codecs**: VP8 ✅, VP9 ✅, H.264 ✅ (decoder + encoder), H.265/HEVC ✅ (VideoToolbox decode), AV1, MPEG-4, MPEG-2
-  - **Audio codecs**: PCM ✅, Opus ✅, AAC ✅ (decoder + encoder), MP3, Vorbis, FLAC
+  - **Audio codecs**: PCM ✅, Opus ✅, AAC ✅ (decoder + encoder), MP3 ✅ (decode), Vorbis ✅ (decode), FLAC
   - **Image codecs**: JPEG, PNG, HEIC, AVIF
   - A decoder takes Packets and produces Frames
   - An encoder takes Frames and produces Packets
@@ -285,9 +286,12 @@ Implement Packet and Frame abstractions with support for various media types. Th
 
 **Video Codecs** (decoders/encoders) - Priority:
 - ✅ **VP8**: Google's open video codec **IMPLEMENTED** in `rust_media_codec/src/video/vp8.rs`
-  - Uses libvpx via vpx-rs bindings (version 0.2.1)
+  - Uses libvpx via vpx-rs bindings
   - Decoder: Fully functional with YUV420P (I420) output
-  - Encoder: Functional with limited configuration options (see limitations below)
+  - Encoder: Fully configurable via `Vp8EncoderConfig` builder
+    - Rate control: VBR, CBR, CQ (constrained quality), Q (pure quantizer)
+    - Speed (cpu-used), GOP size, keyframe intervals, quantizer range, threads
+    - `Vp8Encoder::with_config(stream_info, config)` preferred constructor
   - See `crates/rust_media_codec/examples/test_vp8_codec.rs` for decode/encode roundtrip example
 - ✅ **H.264/AVC** (decoder + encoder) **IMPLEMENTED**
   - **Decoder**: rust_h264 (MIT/Apache-2.0) in `rust_media_codec/src/video/h264.rs`
@@ -313,17 +317,21 @@ Implement Packet and Frame abstractions with support for various media types. Th
     - Requires `gpl-x264` feature flag
     - Uses x264 crate (v0.5.0) - safe Rust bindings to libx264
     - Requires system libx264 (`brew install x264` or `apt-get install libx264-dev`)
-    - Profile: High (maximum quality/features)
-    - Preset: Medium (balanced speed/quality)
-    - Annex B output format for muxer compatibility
-    - Full B-frame support with proper flush handling
+    - Configurable via `X264EncoderConfig` builder:
+      - Speed preset 0..9 (ultrafast → placebo), default 5 (medium)
+      - CRF quality, GOP size, min keyframe interval
+    - Profile: High, Annex B output, full B-frame support
+    - `codec_config()` returns cached avcC (AVCDecoderConfigurationRecord)
+      built from SPS/PPS at construction time
     - Build with: `cargo build --features gpl-x264`
 - ✅ **VP9**: Google's successor to VP8 **IMPLEMENTED** in `rust_media_codec/src/video/vp9.rs`
-  - Uses libvpx via vpx-rs bindings (version 0.2.1)
+  - Uses libvpx via vpx-rs bindings
   - Decoder: Fully functional with YUV420P (I420) output, 10-bit Profile 2 planned
-  - Encoder: Functional with limited configuration options (similar limitations to VP8)
-  - 30-50% better compression than VP8 at same quality
-  - Tile-based encoding for better parallelization
+  - Encoder: Fully configurable via `Vp9EncoderConfig` builder
+    - Rate control: VBR, CBR, CQ, Q (same as VP8)
+    - Speed, GOP size, keyframe intervals, quantizer range, threads
+    - VP9-specific: tile columns and tile rows for parallelization
+    - `codec_config()` returns vpcC payload for MP4/WebM muxing
   - BSD-3-Clause licensed - default, MIT-compatible
   - See `crates/rust_media_codec/examples/test_vp9_codec.rs` for decode/encode roundtrip example
 - ✅ **H.265/HEVC** (decoder) **IMPLEMENTED** via VideoToolbox
@@ -412,6 +420,13 @@ Implement Packet and Frame abstractions with support for various media types. Th
   - Encoder: Supports 8-96 kHz sample rates, mono and stereo, raw AAC output for MP4 muxing
   - Decoder: Supports ADTS-wrapped AAC and raw AAC with AudioSpecificConfig (for MP4)
   - License: Fraunhofer FDK AAC License (not GPL, but has some restrictions)
+- ✅ **Vorbis**: Vorbis decoding via lewton. **IMPLEMENTED** in `rust_media_codec/src/audio/vorbis.rs`
+  - Uses lewton crate (v0.10, BSD-3-Clause) - pure Rust, no external libraries
+  - Parses Xiph-laced identification/comment/setup headers from Matroska CodecPrivate
+  - Uses lewton's low-level `read_audio_packet()` API for per-packet decoding
+  - Maintains `PreviousWindowRight` state across packets for overlap-add windowing
+  - Output: interleaved S16 PCM
+  - Decode only (no encoder)
 
 **Image Codecs** (for thumbnails, still images) - Priority:
 - JPEG
@@ -421,7 +436,6 @@ Implement Packet and Frame abstractions with support for various media types. Th
 
 **Possible Future Codec Support** (depending on requirements):
 - **H.265/HEVC encode**: Via x265 (GPL v2+), requires `gpl-x265` feature
-- **Vorbis**: Open audio codec (used in WebM)
 - **FLAC**: Lossless audio codec
 
 #### 4. Color Space and Bit Depth Handling 🚧 IN PROGRESS
@@ -545,47 +559,19 @@ Develop tooling to convert FFmpeg CLI commands to rust_media equivalents, easing
   - Encoder: Functional but with limited configuration options
   - See `examples/test_vp8_codec.rs` for usage demonstration
 
-### VP8 Encoder Current Limitations
+### Encoder Configuration Pattern
 
-The VP8 encoder currently has hardcoded values for many settings that should be configurable:
+All video encoders follow a consistent pattern with codec-specific config structs
+and builder APIs, similar to AV1's `Av1EncoderConfig`:
 
-**Settings extracted from StreamInfo** (configurable):
-- Codec identifier (must be "vp8")
-- Video dimensions (width × height)
-- Bitrate (default: 1 Mbps if not specified)
-- Timebase (numerator/denominator)
+- **VP8**: `Vp8EncoderConfig` — speed, rate control (VBR/CBR/CQ/Q), GOP size, keyframe min/max, quantizer range, threads
+- **VP9**: `Vp9EncoderConfig` — same as VP8 plus tile columns/rows; `codec_config()` returns vpcC payload
+- **H.264**: `X264EncoderConfig` — speed preset (0..9 mapping to x264 presets), CRF, GOP size, keyint min; `codec_config()` returns avcC record
+- **AV1**: `Av1EncoderConfig` — speed preset, rate control (quantizer/bitrate), key frame interval, tiles, low latency, error resilient; `codec_config()` returns av1C sequence header
 
-**Hardcoded settings** (not yet configurable):
-- **Rate Control**: Hardcoded to Variable Bitrate (VBR)
-  - Should support: Constant Bitrate (CBR), Constant Quality (CQ), Quantizer (Q) modes
-- **Encoding Deadline**: Hardcoded to `GoodQuality` (balanced speed/quality)
-  - Should support: `BestQuality` (slowest), `Realtime` (fastest)
-- **GOP Size**: Uses libvpx default (automatic keyframe placement)
-  - Should expose: GOP size configuration for predictable keyframe intervals
-- **Keyframe Interval**: Uses libvpx default (~128-256 frames)
-  - Should expose: Max keyframe distance control
-- **Quality Range**: Uses libvpx defaults (min_q=4, max_q=63)
-  - Should expose: Min/max quantizer control for quality tuning
-- **Frame Duration**: Hardcoded to 1 timebase unit
-  - Should derive: From frame rate automatically
-- **Frame Flags**: Cannot force keyframes on specific frames
-  - Should support: `FORCE_KEYFRAME` for scene changes, seek points
-- **Threading**: Uses libvpx auto-detection
-  - Should expose: Thread count configuration
-- **Error Resilience**: Not configured
-  - Should expose: Partition count for error resilience
-
-**Future Enhancement Plan**:
-
-Three approaches are documented in `rust_media_codec/src/video/vp8.rs`:
-
-1. **Option 1: Extend StreamInfo** - Add generic key-value encoder config to StreamInfo
-2. **Option 2: Codec-Specific Config Struct** (recommended) - Create `Vp8EncoderConfig` with all settings
-3. **Option 3: Builder Pattern** (recommended) - `Vp8Encoder::builder().rate_control(...).gop_size(...).build()`
-
-Options 2 and 3 are preferred for type-safety, clear documentation, and codec-specific feature support without polluting the generic StreamInfo structure.
-
-See detailed documentation in `crates/rust_media_codec/src/video/vp8.rs` for comprehensive information about available vpx-rs settings not yet exposed and implementation details.
+All encoders provide `new(stream_info)` for defaults, `with_bitrate(stream_info, bps)` for convenience,
+and `with_config(stream_info, config)` for full control. The CLI maps its `--speed`, `--qp`, `-g`,
+`--keyint-min`, `--tile-columns`, `--tile-rows` flags to each encoder's config automatically.
 
 - Filter graph should support both programmatic and CLI-based construction
 

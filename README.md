@@ -7,7 +7,7 @@ A Rust-based media processing framework - an FFmpeg equivalent with streaming AP
 `rust_media` is a comprehensive media processing framework that provides:
 - **Streaming APIs** for bounded memory usage with arbitrarily large files
 - **Container format** support (WAV ✅, WebM ✅, MKV ✅ demuxer, MP4 ✅ demuxer + muxer)
-- **Codec** support (PCM ✅, Opus ✅, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AV1 ✅ decode + encode, AAC ✅)
+- **Codec** support (PCM ✅, Opus ✅, Vorbis ✅ decode, MP3 ✅ decode, VP8 ✅, VP9 ✅, H.264 ✅, H.265/HEVC ✅ decode, AV1 ✅ decode + encode, AAC ✅)
 - **Filter** support (audio resampling ✅, volume ✅, video scale ✅, crop ✅, SSIM quality metric ✅)
 - **10-bit pixel format** support end-to-end (decode, scale, crop, with auto 10→8 conversion at encoder boundary)
 - **Format detection** from magic bytes with file extension fallback
@@ -115,17 +115,17 @@ This project is in active development. Current status:
 ### Codecs
 - ✅ **PCM** codec (decoder + encoder)
 - ✅ **Opus** codec (decoder + encoder)
+- ✅ **Vorbis** decoder (via lewton, pure Rust, BSD-3-Clause)
 - ✅ **MP3** decoder (via minimp3, MIT)
-- ✅ **VP8** codec (decoder + encoder via libvpx)
-- ✅ **VP9** codec (decoder + encoder via libvpx)
+- ✅ **VP8** codec (decoder + encoder via libvpx, configurable via `Vp8EncoderConfig`)
+- ✅ **VP9** codec (decoder + encoder via libvpx, configurable via `Vp9EncoderConfig`)
 - ✅ **H.264** decoder (via rust_h264, pure Rust, MIT/Apache-2.0) - *Baseline, Main, High profiles*
 - ✅ **H.264** decoder (via VideoToolbox, requires `videotoolbox` feature) - *All profiles, macOS only*
-- ✅ **H.264** encoder (via x264, requires `gpl-x264` feature)
+- ✅ **H.264** encoder (via x264, requires `gpl-x264` feature, configurable via `X264EncoderConfig`)
 - ✅ **H.265/HEVC** decoder (via VideoToolbox, requires `videotoolbox` feature) - *macOS only, hardware accelerated, 8-bit + 10-bit (Main 10 / HDR)*
 - ✅ **AV1** decoder (via dav1d, BSD-2-Clause, default build) - *Main + Main 10 profiles (8-bit + 10-bit)*
-- ✅ **AV1** encoder (via rav1e, BSD-2-Clause, default build) - *8-bit and 10-bit YUV420; pure-Rust, no external libs*
+- ✅ **AV1** encoder (via rav1e, BSD-2-Clause, default build) - *8-bit and 10-bit YUV420; configurable via `Av1EncoderConfig`*
 - ✅ **AAC** codec (encoder + decoder via libfdk-aac, requires `fdk-aac` feature)
-- 📋 AV1 encoder (rav1e) - Planned
 
 ### Filters
 - ✅ **aresample** - Audio resampling (sinc interpolation via rubato)
@@ -149,10 +149,12 @@ This project is in active development. Current status:
   - Frame analysis with decoding
   - JSON and text output formats
 - ✅ **transform** - Transcode media files (similar to ffmpeg)
-  - Video transcoding (VP8, VP9, H.264)
+  - Video transcoding (VP8, VP9, H.264, AV1)
   - Audio transcoding (Opus, AAC, PCM)
+  - Audio decoding (Vorbis, MP3, AAC, Opus, PCM)
   - Stream copy (passthrough)
   - Bitrate control
+  - Encoder options: `--speed`, `--qp`, `-g` (GOP size), `--keyint-min`, `--tile-columns`, `--tile-rows` — work for all video encoders
   - Audio filters (`--af`): resampling, volume (`--af "volume=0.5,aresample=48000"`)
   - Video filters (`--vf`): scale, crop, SSIM quality comparison (`--vf "crop=320:240,scale=160:120"`)
   - Auto-resampling when encoder requires a different sample rate
