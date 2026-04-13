@@ -250,6 +250,7 @@ impl Vp8Encoder {
             tile_rows: None,
             rc_min_quantizer: config.min_quantizer,
             rc_max_quantizer: config.max_quantizer,
+            bit_depth: 8, // VP8 is always 8-bit
         };
 
         let encoder = VpxEncoder::new(&vpx_config)

@@ -40,7 +40,7 @@ x264 = { version = "...", optional = true }
 | Codec | Library | License | Feature Flag | Status |
 |-------|---------|---------|--------------|--------|
 | VP8 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit) |
-| VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit; 10-bit Profile 2 planned) |
+| VP9 | libvpx (vpx-rs) | BSD-3-Clause | *(default)* | ✅ Implemented (8-bit Profile 0 + 10-bit Profile 2) |
 | AV1 (decode) | dav1d | BSD-2-Clause | *(default)* | ✅ Implemented (Main + Main 10, 8-bit + 10-bit) |
 | AV1 (encode) | rav1e | BSD-2-Clause | *(default)* | ✅ Implemented (8-bit + 10-bit, YUV420) |
 | H.264 (decode) | rust_h264 | MIT/Apache-2.0 | *(default)* | ✅ Implemented (Baseline, Main, High) |
@@ -327,12 +327,14 @@ Implement Packet and Frame abstractions with support for various media types. Th
     - Build with: `cargo build --features gpl-x264`
 - ✅ **VP9**: Google's successor to VP8 **IMPLEMENTED** in `rust_media_codec/src/video/vp9.rs`
   - Uses libvpx via vpx-rs bindings
-  - Decoder: Fully functional with YUV420P (I420) output, 10-bit Profile 2 planned
+  - Decoder: Fully functional, auto-detects 8-bit (YUV420P) or 10-bit (YUV420P10LE) output
   - Encoder: Fully configurable via `Vp9EncoderConfig` builder
+    - Supports 8-bit (Profile 0) and 10-bit (Profile 2) — bit depth locked at
+      construction from `StreamInfo.params.pixel_format`
     - Rate control: VBR, CBR, CQ, Q (same as VP8)
     - Speed, GOP size, keyframe intervals, quantizer range, threads
     - VP9-specific: tile columns and tile rows for parallelization
-    - `codec_config()` returns vpcC payload for MP4/WebM muxing
+    - `codec_config()` returns vpcC payload with correct profile/bit depth
   - BSD-3-Clause licensed - default, MIT-compatible
   - See `crates/rust_media_codec/examples/test_vp9_codec.rs` for decode/encode roundtrip example
 - ✅ **H.265/HEVC** (decoder) **IMPLEMENTED** via VideoToolbox

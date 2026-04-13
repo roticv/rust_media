@@ -1081,6 +1081,15 @@ fn transcode_to_mp4(
                 } else if out_codec == "vp9" {
                     let vpcc = build_vp9_codec_config(vs, video_bitrate)?;
                     out_stream.extra_data = vpcc;
+                    if let StreamParams::Video(ref mut vp) = out_stream.params {
+                        if matches!(
+                            vs.params,
+                            StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
+                        ) {
+                            vp.pixel_format = PixelFormat::YUV420P10LE;
+                            vp.bit_depth = 10;
+                        }
+                    }
                 }
                 #[cfg(feature = "gpl-x264")]
                 if out_codec == "h264" || out_codec == "avc" {
@@ -1245,6 +1254,15 @@ fn transcode_to_webm(
                 } else if out_codec == "vp9" {
                     let vpcc = build_vp9_codec_config(vs, video_bitrate)?;
                     out_stream.extra_data = vpcc;
+                    if let StreamParams::Video(ref mut vp) = out_stream.params {
+                        if matches!(
+                            vs.params,
+                            StreamParams::Video(ref ivp) if ivp.pixel_format == PixelFormat::YUV420P10LE
+                        ) {
+                            vp.pixel_format = PixelFormat::YUV420P10LE;
+                            vp.bit_depth = 10;
+                        }
+                    }
                 }
             }
             muxer.add_stream(out_stream)?;
@@ -1618,7 +1636,7 @@ fn process_packets<M: Muxer>(
     // AV1 (rav1e) is the only encoder we currently have that accepts 10-bit
     // input directly. Everything else gets auto-downconverted from
     // YUV420P10LE → YUV420P at the encoder boundary.
-    let encoder_supports_10bit = matches!(video_codec, "av1" | "av01");
+    let encoder_supports_10bit = matches!(video_codec, "av1" | "av01" | "vp9");
 
     /// Helper: encode a frame and write resulting packets to the muxer.
     /// Accumulates output bytes written into `output_bytes`.
@@ -2297,11 +2315,11 @@ fn create_video_encoder(
         _ => return Err("Not a video stream".into()),
     };
 
-    // For AV1 we honor the input bit depth so 10-bit content can be encoded
-    // natively without going through the auto-downconversion path. Other
-    // encoders are 8-bit only and always get YUV420P.
+    // For AV1 and VP9 we honor the input bit depth so 10-bit content can be
+    // encoded natively without going through the auto-downconversion path.
+    // Other encoders are 8-bit only and always get YUV420P.
     let encoder_pixel_format = match (codec, input_pixel_format) {
-        ("av1" | "av01", PixelFormat::YUV420P10LE) => PixelFormat::YUV420P10LE,
+        ("av1" | "av01" | "vp9", PixelFormat::YUV420P10LE) => PixelFormat::YUV420P10LE,
         _ => PixelFormat::YUV420P,
     };
 

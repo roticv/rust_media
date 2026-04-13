@@ -56,7 +56,13 @@ impl Decoder for Vp9Decoder {
             .map_err(|e| Error::Decode(format!("VP9 decode failed: {}", e)))?;
 
         for df in decoded_frames {
-            let mut frame = Frame::new_video(df.width, df.height, PixelFormat::YUV420P);
+            let pixel_format = if df.bit_depth > 8 {
+                PixelFormat::YUV420P10LE
+            } else {
+                PixelFormat::YUV420P
+            };
+
+            let mut frame = Frame::new_video(df.width, df.height, pixel_format);
             frame.set_pts(pts);
 
             let y_plane = frame.plane_mut(0)
@@ -202,10 +208,15 @@ impl Vp9EncoderConfig {
     }
 }
 
-/// VP9 video encoder
+/// VP9 video encoder.
+///
+/// Supports both 8-bit (YUV420P, Profile 0) and 10-bit (YUV420P10LE,
+/// Profile 2) input. Bit depth is locked at construction from the
+/// `StreamInfo` pixel format.
 pub struct Vp9Encoder {
     stream_info: StreamInfo,
     encoder: VpxEncoder,
+    bit_depth: u8,
     frame_count: i64,
     buffered_packets: Vec<Packet>,
     flushed: bool,
@@ -238,6 +249,14 @@ impl Vp9Encoder {
             )),
         };
 
+        let bit_depth: u8 = match video_params.pixel_format {
+            PixelFormat::YUV420P => 8,
+            PixelFormat::YUV420P10LE => 10,
+            other => return Err(Error::Unsupported(format!(
+                "VP9 encoder supports YUV420P (8-bit) or YUV420P10LE (10-bit), got {:?}", other
+            ))),
+        };
+
         let default_bitrate_kbps = (stream_info.bitrate.unwrap_or(1_000_000) / 1000) as u32;
 
         let rate_control = match config.rate_control {
@@ -257,6 +276,7 @@ impl Vp9Encoder {
             timebase_num: stream_info.time_base.0,
             timebase_den: stream_info.time_base.1,
             rate_control,
+            bit_depth,
             kf_max_dist: config.kf_max_dist,
             kf_min_dist: config.kf_min_dist,
             threads: config.threads,
@@ -271,7 +291,7 @@ impl Vp9Encoder {
             .map_err(|e| Error::Encode(format!("Failed to create VP9 encoder: {}", e)))?;
 
         Ok(Self {
-            stream_info, encoder, frame_count: 0,
+            stream_info, encoder, bit_depth, frame_count: 0,
             buffered_packets: Vec::new(), flushed: false,
         })
     }
@@ -283,12 +303,12 @@ impl Vp9Encoder {
     /// Can be called immediately after construction — the bytes are fully
     /// determined by the encoder configuration.
     pub fn codec_config(&self) -> Vec<u8> {
-        let bit_depth: u8 = 8; // VP9 encoder only supports 8-bit currently
+        let profile: u8 = if self.bit_depth > 8 { 2 } else { 0 };
         let chroma_subsampling: u8 = 1; // 4:2:0
         vec![
-            0,  // profile (Profile 0)
+            profile,
             10, // level (1.0)
-            (bit_depth << 4) | (chroma_subsampling << 1), // bitDepth(4)|chromaSubsampling(3)|videoFullRangeFlag(1)
+            (self.bit_depth << 4) | (chroma_subsampling << 1), // bitDepth(4)|chromaSubsampling(3)|videoFullRangeFlag(1)
             1,  // colourPrimaries (BT.709)
             1,  // transferCharacteristics (BT.709)
             1,  // matrixCoefficients (BT.709)
@@ -315,9 +335,14 @@ impl Encoder for Vp9Encoder {
             )),
         };
 
-        if frame_params.format != PixelFormat::YUV420P {
+        let expected_fmt = if self.bit_depth > 8 {
+            PixelFormat::YUV420P10LE
+        } else {
+            PixelFormat::YUV420P
+        };
+        if frame_params.format != expected_fmt {
             return Err(Error::Unsupported(format!(
-                "VP9 encoder currently only supports YUV420P, got {:?}", frame_params.format
+                "VP9 encoder expects {:?}, got {:?}", expected_fmt, frame_params.format
             )));
         }
 

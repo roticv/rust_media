@@ -119,7 +119,7 @@ This project is in active development. Current status:
 - ✅ **FLAC** decoder (via claxon, pure Rust, Apache-2.0)
 - ✅ **MP3** decoder (via minimp3, MIT)
 - ✅ **VP8** codec (decoder + encoder via libvpx, configurable via `Vp8EncoderConfig`)
-- ✅ **VP9** codec (decoder + encoder via libvpx, configurable via `Vp9EncoderConfig`)
+- ✅ **VP9** codec (decoder + encoder via libvpx, 8-bit + 10-bit Profile 2, configurable via `Vp9EncoderConfig`)
 - ✅ **H.264** decoder (via rust_h264, pure Rust, MIT/Apache-2.0) - *Baseline, Main, High profiles*
 - ✅ **H.264** decoder (via VideoToolbox, requires `videotoolbox` feature) - *All profiles, macOS only*
 - ✅ **H.264** encoder (via x264, requires `gpl-x264` feature, configurable via `X264EncoderConfig`)

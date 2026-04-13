@@ -64,6 +64,9 @@ pub struct EncoderConfig {
     pub timebase_num: u32,
     pub timebase_den: u32,
     pub rate_control: RateControl,
+    /// Bit depth (8 or 10). Default: 8. When 10, the encoder expects I42016
+    /// input (packed u16 LE samples) and sets VP9 Profile 2.
+    pub bit_depth: u8,
     /// Maximum keyframe interval in frames. `None` uses the libvpx default.
     pub kf_max_dist: Option<u32>,
     /// Minimum keyframe interval in frames. `None` uses the libvpx default.
@@ -97,6 +100,7 @@ pub struct Encoder {
     ctx: vpx_sys::vpx_codec_ctx_t,
     width: u32,
     height: u32,
+    bit_depth: u8,
 }
 
 impl Encoder {
@@ -149,6 +153,20 @@ impl Encoder {
             cfg.rc_max_quantizer = max_q;
         }
 
+        // 10-bit / high-bit-depth configuration
+        let hbd = config.bit_depth > 8;
+        if hbd {
+            cfg.g_profile = 2; // VP9 Profile 2 (10/12-bit, 4:2:0)
+            cfg.g_bit_depth = vpx_sys::vpx_bit_depth_VPX_BITS_10;
+            cfg.g_input_bit_depth = config.bit_depth as u32;
+        }
+
+        let init_flags: vpx_sys::vpx_codec_flags_t = if hbd {
+            vpx_sys::VPX_CODEC_USE_HIGHBITDEPTH as vpx_sys::vpx_codec_flags_t
+        } else {
+            0
+        };
+
         let mut ctx =
             unsafe { MaybeUninit::<vpx_sys::vpx_codec_ctx_t>::zeroed().assume_init() };
         let status = unsafe {
@@ -156,7 +174,7 @@ impl Encoder {
                 &mut ctx,
                 iface as *mut _,
                 &cfg,
-                0,
+                init_flags,
                 vpx_sys::VPX_ENCODER_ABI_VERSION as i32,
             )
         };
@@ -213,12 +231,14 @@ impl Encoder {
             ctx,
             width: config.width,
             height: config.height,
+            bit_depth: config.bit_depth,
         })
     }
 
-    /// Encode a single I420 frame.
+    /// Encode a single I420 (8-bit) or I42016 (10-bit) frame.
     ///
-    /// `yuv_data` must be packed I420: Y plane (w*h), then U (w/2*h/2), then V (w/2*h/2).
+    /// For 8-bit: `yuv_data` is packed I420 — Y (w*h), U (w/2*h/2), V (w/2*h/2).
+    /// For 10-bit: `yuv_data` is packed I42016 — same layout but 2 bytes/sample (LE u16).
     pub fn encode(
         &mut self,
         pts: i64,
@@ -229,7 +249,8 @@ impl Encoder {
     ) -> Result<Vec<EncodedPacket>> {
         let w = self.width as usize;
         let h = self.height as usize;
-        let expected = w * h + 2 * (w / 2) * (h / 2);
+        let bps: usize = if self.bit_depth > 8 { 2 } else { 1 };
+        let expected = (w * h + 2 * (w / 2) * (h / 2)) * bps;
         if yuv_data.len() != expected {
             return Err(crate::Error::BadImageData {
                 expected,
@@ -237,12 +258,18 @@ impl Encoder {
             });
         }
 
+        let img_fmt = if self.bit_depth > 8 {
+            vpx_sys::vpx_img_fmt_VPX_IMG_FMT_I42016
+        } else {
+            vpx_sys::vpx_img_fmt_VPX_IMG_FMT_I420
+        };
+
         let mut img =
             unsafe { MaybeUninit::<vpx_sys::vpx_image_t>::zeroed().assume_init() };
         let result = unsafe {
             vpx_sys::vpx_img_wrap(
                 &mut img,
-                vpx_sys::vpx_img_fmt_VPX_IMG_FMT_I420,
+                img_fmt,
                 self.width,
                 self.height,
                 1,

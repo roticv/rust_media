@@ -10,11 +10,13 @@ pub struct DecoderConfig {
     pub height: u32,
 }
 
-/// A decoded video frame in I420 format.
+/// A decoded video frame in I420 (8-bit) or I42016 (10-bit) format.
 pub struct DecodedFrame {
     pub width: usize,
     pub height: usize,
-    /// Y plane data (packed, width * height bytes)
+    /// Bit depth (8 or 10). When 10, plane data uses 2 bytes per sample (LE u16).
+    pub bit_depth: u32,
+    /// Y plane data (packed). 1 byte/sample for 8-bit, 2 bytes/sample for 10-bit.
     pub y: Vec<u8>,
     pub y_stride: usize,
     /// U plane data (packed)
@@ -86,6 +88,7 @@ impl Decoder {
             let img = unsafe { &*img };
             let w = img.d_w as usize;
             let h = img.d_h as usize;
+            let bit_depth = img.bit_depth;
 
             let y_stride = img.stride[0] as usize;
             let u_stride = img.stride[1] as usize;
@@ -98,13 +101,17 @@ impl Decoder {
             let chroma_h = h.div_ceil(2);
             let chroma_w = w.div_ceil(2);
 
-            let y = copy_plane(y_ptr, y_stride, w, h);
-            let u = copy_plane(u_ptr, u_stride, chroma_w, chroma_h);
-            let v = copy_plane(v_ptr, v_stride, chroma_w, chroma_h);
+            // For 10-bit (HBD), each sample is stored as a u16 (2 bytes).
+            let bps = if bit_depth > 8 { 2 } else { 1 };
+
+            let y = copy_plane(y_ptr, y_stride, w * bps, h);
+            let u = copy_plane(u_ptr, u_stride, chroma_w * bps, chroma_h);
+            let v = copy_plane(v_ptr, v_stride, chroma_w * bps, chroma_h);
 
             frames.push(DecodedFrame {
                 width: w,
                 height: h,
+                bit_depth,
                 y,
                 y_stride,
                 u,
