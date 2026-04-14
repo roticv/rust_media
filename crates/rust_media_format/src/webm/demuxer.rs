@@ -13,6 +13,15 @@ use std::io::{Read, Seek, SeekFrom};
 /// WebM file demuxer
 ///
 /// Reads audio/video data from WebM files using the streaming Demuxer API.
+/// A single cue point from the Matroska Cues element (seek index).
+#[derive(Debug, Clone)]
+struct CuePoint {
+    /// Timestamp in timecode_scale units.
+    timestamp: u64,
+    /// Byte offset of the cluster from the start of the Segment.
+    cluster_position: u64,
+}
+
 pub struct WebmDemuxer<R> {
     reader: R,
     streams: Vec<StreamInfo>,
@@ -20,9 +29,10 @@ pub struct WebmDemuxer<R> {
     timecode_scale: u64, // nanoseconds per tick
     cluster_timecode: u64,
     current_position: u64,
-    #[allow(dead_code)]
     segment_start: u64,
     tracks_parsed: bool,
+    /// Parsed Cue index from the Cues element. Sorted by timestamp.
+    cues: Vec<CuePoint>,
 }
 
 #[derive(Debug)]
@@ -104,6 +114,7 @@ impl<R: Read + Seek> WebmDemuxer<R> {
             current_position: 0,
             segment_start,
             tracks_parsed: false,
+            cues: Vec::new(),
         };
 
         // Parse segment info and tracks
@@ -130,8 +141,10 @@ impl<R: Read + Seek> WebmDemuxer<R> {
                         .seek(SeekFrom::Start(elem.position))?;
                     break;
                 }
-                element_id::SEEK_HEAD | element_id::CUES => {
-                    // Skip these for now
+                element_id::CUES => {
+                    self.parse_cues(&elem)?;
+                }
+                element_id::SEEK_HEAD => {
                     elem.skip(&mut self.reader)?;
                 }
                 _ => {
@@ -460,8 +473,37 @@ impl<R: Read + Seek> Demuxer for WebmDemuxer<R> {
         }
     }
 
-    fn seek(&mut self, _timestamp_us: i64) -> Result<()> {
-        Err(Error::NotImplemented("WebM seeking not yet implemented".to_string()))
+    fn seek(&mut self, timestamp_us: i64) -> Result<()> {
+        // Convert microseconds to timecode_scale units for Cue lookup.
+        // pts_us = (timecode * timecode_scale) / 1000
+        // ⟹ timecode = pts_us * 1000 / timecode_scale
+        let target_tc = if self.timecode_scale > 0 {
+            (timestamp_us.max(0) as u64 * 1000) / self.timecode_scale
+        } else {
+            0
+        };
+
+        if !self.cues.is_empty() {
+            // Binary search for the last cue point <= target timestamp.
+            let idx = match self.cues.binary_search_by_key(&target_tc, |c| c.timestamp) {
+                Ok(i) => i,
+                Err(0) => 0,
+                Err(i) => i - 1,
+            };
+            let cue = &self.cues[idx];
+            let abs_pos = self.segment_start + cue.cluster_position;
+            self.reader.seek(SeekFrom::Start(abs_pos))?;
+            self.cluster_timecode = cue.timestamp;
+        } else {
+            // No Cues — fall back to scanning from the start of the Segment.
+            // Seek to the first Cluster and scan forward until we pass the
+            // target timestamp, remembering the last cluster position that
+            // was at or before the target.
+            self.reader.seek(SeekFrom::Start(self.segment_start))?;
+            self.scan_to_cluster_before(target_tc)?;
+        }
+
+        Ok(())
     }
 
     fn seek_stream(&mut self, stream_index: usize, timestamp: i64) -> Result<()> {
@@ -471,7 +513,15 @@ impl<R: Read + Seek> Demuxer for WebmDemuxer<R> {
                 stream_index
             )));
         }
-        self.seek(timestamp)
+        // Convert stream time_base units to microseconds.
+        let stream = &self.streams[stream_index];
+        let (tb_num, tb_den) = stream.time_base;
+        let timestamp_us = if tb_den > 0 {
+            timestamp * tb_num as i64 * 1_000_000 / tb_den as i64
+        } else {
+            timestamp
+        };
+        self.seek(timestamp_us)
     }
 
     fn position(&self) -> u64 {
@@ -635,6 +685,123 @@ impl<R: Read + Seek> WebmDemuxer<R> {
         }
 
         Ok((value, length))
+    }
+
+    /// Parse the Cues element into an in-memory seek index.
+    fn parse_cues(&mut self, parent: &Element) -> Result<()> {
+        let end_pos = self.reader.stream_position()? + parent.size.unwrap_or(0);
+
+        while self.reader.stream_position()? < end_pos {
+            let elem = Element::read(&mut self.reader)?;
+            if elem.id == element_id::CUE_POINT {
+                if let Some(cue) = self.parse_cue_point(&elem)? {
+                    self.cues.push(cue);
+                }
+            } else {
+                elem.skip(&mut self.reader)?;
+            }
+        }
+
+        // Ensure sorted by timestamp for binary search.
+        self.cues.sort_by_key(|c| c.timestamp);
+        Ok(())
+    }
+
+    /// Parse a single CuePoint element.
+    fn parse_cue_point(&mut self, parent: &Element) -> Result<Option<CuePoint>> {
+        let end_pos = self.reader.stream_position()? + parent.size.unwrap_or(0);
+
+        let mut timestamp = None;
+        let mut cluster_position = None;
+
+        while self.reader.stream_position()? < end_pos {
+            let elem = Element::read(&mut self.reader)?;
+            match elem.id {
+                element_id::CUE_TIME => {
+                    timestamp = Some(elem.read_uint(&mut self.reader)?);
+                }
+                element_id::CUE_TRACK_POSITIONS => {
+                    // Parse the first CueTrackPositions for the cluster offset.
+                    let tp_end = self.reader.stream_position()? + elem.size.unwrap_or(0);
+                    while self.reader.stream_position()? < tp_end {
+                        let tp_elem = Element::read(&mut self.reader)?;
+                        if tp_elem.id == element_id::CUE_CLUSTER_POSITION {
+                            cluster_position = Some(tp_elem.read_uint(&mut self.reader)?);
+                        } else {
+                            tp_elem.skip(&mut self.reader)?;
+                        }
+                    }
+                }
+                _ => {
+                    elem.skip(&mut self.reader)?;
+                }
+            }
+        }
+
+        match (timestamp, cluster_position) {
+            (Some(ts), Some(pos)) => Ok(Some(CuePoint {
+                timestamp: ts,
+                cluster_position: pos,
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    /// Fallback seek: scan from current position through Clusters to find the
+    /// last Cluster whose timecode is <= target. Leaves the reader positioned
+    /// at the start of that Cluster's data.
+    fn scan_to_cluster_before(&mut self, target_tc: u64) -> Result<()> {
+        let mut best_pos: Option<u64> = None;
+        let mut best_tc: u64 = 0;
+
+        loop {
+            let elem = match Element::read(&mut self.reader) {
+                Ok(e) => e,
+                Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            };
+
+            if elem.id == element_id::CLUSTER {
+                let cluster_data_start = self.reader.stream_position()?;
+                // Try to read the timecode from the first child element.
+                let tc = match Element::read(&mut self.reader) {
+                    Ok(tc_elem) if tc_elem.id == element_id::TIMECODE => {
+                        tc_elem.read_uint(&mut self.reader)?
+                    }
+                    _ => 0,
+                };
+
+                if tc <= target_tc {
+                    best_pos = Some(elem.position);
+                    best_tc = tc;
+                } else {
+                    // Past target — the previous cluster was the one we want.
+                    break;
+                }
+
+                // Skip the rest of this cluster to reach the next one.
+                if let Some(size) = elem.size {
+                    let cluster_end = cluster_data_start + size;
+                    self.reader.seek(SeekFrom::Start(cluster_end))?;
+                } else {
+                    // Unknown-size cluster — can't skip efficiently, stop here.
+                    break;
+                }
+            } else {
+                elem.skip(&mut self.reader)?;
+            }
+        }
+
+        // Seek to the best cluster found (or stay at segment start if none).
+        if let Some(pos) = best_pos {
+            self.reader.seek(SeekFrom::Start(pos))?;
+            self.cluster_timecode = best_tc;
+        } else {
+            self.reader.seek(SeekFrom::Start(self.segment_start))?;
+            self.cluster_timecode = 0;
+        }
+
+        Ok(())
     }
 
     fn find_stream_index(&self, track_number: u64) -> Result<usize> {

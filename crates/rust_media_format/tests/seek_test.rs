@@ -315,28 +315,68 @@ fn seek_then_decode_produces_valid_frames() {
 }
 
 #[test]
-fn webm_seek_returns_not_implemented() {
+fn webm_seek_to_start_returns_all_packets() {
     use rust_media_format::WebmDemuxer;
 
-    // WebM seeking is not yet implemented — verify it returns the expected error
-    // rather than panicking or silently misbehaving.
-    // This test documents the gap and will need updating when WebM seeking
-    // is implemented.
     let webm_data = build_test_webm();
     let mut demuxer = WebmDemuxer::open(Cursor::new(webm_data)).unwrap();
 
-    let result = demuxer.seek(500_000);
-    assert!(
-        result.is_err(),
-        "WebM seek should return an error (not yet implemented)"
+    // Read all packets
+    let mut all_packets = Vec::new();
+    loop {
+        match demuxer.read_packet() {
+            Ok(pkt) => all_packets.push(pkt),
+            Err(Error::EndOfStream) => break,
+            Err(e) => panic!("read_packet failed: {:?}", e),
+        }
+    }
+    assert!(!all_packets.is_empty(), "should have packets in WebM");
+
+    // Seek to start and read again
+    demuxer.seek(0).unwrap();
+    let mut after_seek = Vec::new();
+    loop {
+        match demuxer.read_packet() {
+            Ok(pkt) => after_seek.push(pkt),
+            Err(Error::EndOfStream) => break,
+            Err(e) => panic!("read_packet failed after seek: {:?}", e),
+        }
+    }
+
+    assert_eq!(
+        all_packets.len(),
+        after_seek.len(),
+        "WebM seek to 0 should yield same packet count ({} vs {})",
+        all_packets.len(),
+        after_seek.len()
     );
 }
 
-/// Build a minimal WebM with a single VP9 keyframe for the WebM seek test.
+#[test]
+fn webm_seek_backward_works() {
+    use rust_media_format::WebmDemuxer;
+
+    let webm_data = build_test_webm();
+    let mut demuxer = WebmDemuxer::open(Cursor::new(webm_data)).unwrap();
+
+    // Read a few packets
+    for _ in 0..3 {
+        let _ = demuxer.read_packet();
+    }
+
+    // Seek back to start
+    demuxer.seek(0).unwrap();
+
+    // Should be able to read packets again
+    let pkt = demuxer.read_packet();
+    assert!(pkt.is_ok(), "should read a packet after seeking back to 0");
+}
+
+/// Build a WebM with VP9 video for seeking tests.
 fn build_test_webm() -> Vec<u8> {
     use rust_media_format::WebmMuxer;
 
-    let frames = color_ramp_frames(WIDTH, HEIGHT, 2);
+    let frames = color_ramp_frames(WIDTH, HEIGHT, 30);
     let video_params = VideoStreamParams::new(WIDTH, HEIGHT, PixelFormat::YUV420P)
         .with_frame_rate(FPS, 1);
     let stream_info = StreamInfo::new(0, MediaType::Video, "vp9".to_string())

@@ -63,6 +63,13 @@ pub mod element_id {
     pub const BLOCK_GROUP: u64 = 0xA0;
     pub const BLOCK: u64 = 0xA1;
     pub const BLOCK_DURATION: u64 = 0x9B;
+
+    // Cues (seek index)
+    pub const CUE_POINT: u64 = 0xBB;
+    pub const CUE_TIME: u64 = 0xB3;
+    pub const CUE_TRACK_POSITIONS: u64 = 0xB7;
+    pub const CUE_TRACK: u64 = 0xF7;
+    pub const CUE_CLUSTER_POSITION: u64 = 0xF1;
 }
 
 /// Reads a variable-length integer (VINT) from the reader for Element IDs
