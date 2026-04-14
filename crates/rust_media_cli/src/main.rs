@@ -2386,6 +2386,21 @@ fn create_video_encoder(
             #[allow(unreachable_code)]
             Err("No H.264 encoder available. Enable 'videotoolbox' (macOS) or 'gpl-x264' feature.".into())
         }
+        #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+        "hevc" | "h265" => {
+            let mut vt_config = rust_media_codec::VideoToolboxEncoderConfig::new()
+                .bitrate(bitrate);
+            if let Some(gop) = encoder_opts.gop_size {
+                vt_config = vt_config.max_keyframe_interval(gop as u32);
+            }
+            if let Some(qp) = encoder_opts.qp {
+                vt_config = vt_config.quality(1.0 - qp as f32 / 51.0);
+            }
+            let encoder = rust_media_codec::VideoToolboxHevcEncoder::with_config(
+                stream_info, vt_config,
+            )?;
+            Ok(Box::new(encoder))
+        }
         _ => Err(format!("No encoder available for video codec: {}", codec).into()),
     }
 }
