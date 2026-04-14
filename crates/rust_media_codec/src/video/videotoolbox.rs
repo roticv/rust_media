@@ -33,15 +33,15 @@
 //! ```
 
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime,
     CMTimeFlags, CMVideoFormatDescription,
 };
 use objc2_core_video::{kCVPixelBufferPixelFormatTypeKey, CVPixelBuffer};
-use objc2_video_toolbox::VTDecompressionSession;
+use objc2_video_toolbox::{VTCompressionSession, VTDecompressionSession};
 use rust_media_core::{
-    Decoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
+    Decoder, Encoder, Error, Frame, MediaType, Packet, PixelFormat, Result, StreamInfo,
 };
 use std::collections::VecDeque;
 use std::ptr;
@@ -1288,6 +1288,633 @@ impl Decoder for VideoToolboxHevcDecoder {
     }
 }
 
+// ============================================================================
+// VideoToolbox H.264 Encoder
+// ============================================================================
+
+/// VideoToolbox H.264 encoder configuration.
+#[derive(Debug, Clone)]
+pub struct VideoToolboxEncoderConfig {
+    /// Target average bitrate in bits per second. Default: 2 Mbps.
+    pub bitrate: u64,
+    /// Maximum keyframe interval in frames. Default: 250.
+    pub max_keyframe_interval: u32,
+    /// Allow B-frames (frame reordering). Default: true.
+    pub allow_frame_reordering: bool,
+    /// Realtime encoding priority. Default: false.
+    pub realtime: bool,
+    /// Quality factor 0.0..1.0 (only used when bitrate is not set). Default: None.
+    pub quality: Option<f32>,
+}
+
+impl Default for VideoToolboxEncoderConfig {
+    fn default() -> Self {
+        Self {
+            bitrate: 2_000_000,
+            max_keyframe_interval: 250,
+            allow_frame_reordering: true,
+            realtime: false,
+            quality: None,
+        }
+    }
+}
+
+impl VideoToolboxEncoderConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bitrate(mut self, bps: u64) -> Self {
+        self.bitrate = bps;
+        self
+    }
+
+    pub fn max_keyframe_interval(mut self, n: u32) -> Self {
+        self.max_keyframe_interval = n;
+        self
+    }
+
+    pub fn allow_frame_reordering(mut self, v: bool) -> Self {
+        self.allow_frame_reordering = v;
+        self
+    }
+
+    pub fn realtime(mut self, v: bool) -> Self {
+        self.realtime = v;
+        self
+    }
+
+    pub fn quality(mut self, q: f32) -> Self {
+        self.quality = Some(q);
+        self
+    }
+}
+
+/// Context shared between the encoder and the compression output callback.
+struct CompressionContext {
+    packets: VecDeque<Packet>,
+}
+
+/// H.264 video encoder using Apple VideoToolbox (hardware accelerated).
+///
+/// Encodes raw YUV420P frames into H.264/AVC compressed packets using macOS
+/// hardware acceleration. Output is in AVCC format (length-prefixed NAL units)
+/// suitable for MP4 muxing.
+///
+/// # Platform
+///
+/// macOS only. Requires `videotoolbox` feature flag.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let config = VideoToolboxEncoderConfig::new().bitrate(5_000_000);
+/// let encoder = VideoToolboxH264Encoder::with_config(stream_info, config)?;
+/// ```
+pub struct VideoToolboxH264Encoder {
+    stream_info: StreamInfo,
+    session: Retained<VTCompressionSession>,
+    width: i32,
+    height: i32,
+    frame_count: i64,
+    buffered_packets: VecDeque<Packet>,
+    flushed: bool,
+    callback_context: Box<CompressionContext>,
+    /// Cached avcC record built from SPS/PPS on first encoded frame.
+    avcc_record: Vec<u8>,
+}
+
+impl VideoToolboxH264Encoder {
+    /// Create with default config. Honors `stream_info.bitrate` if set.
+    pub fn new(stream_info: StreamInfo) -> Result<Self> {
+        let mut config = VideoToolboxEncoderConfig::default();
+        if let Some(br) = stream_info.bitrate {
+            config.bitrate = br;
+        }
+        Self::with_config(stream_info, config)
+    }
+
+    /// Create with explicit configuration.
+    pub fn with_config(stream_info: StreamInfo, config: VideoToolboxEncoderConfig) -> Result<Self> {
+        if stream_info.codec != "h264" && stream_info.codec != "avc" {
+            return Err(Error::Unsupported(format!(
+                "Expected h264/avc codec, got {}",
+                stream_info.codec
+            )));
+        }
+
+        let video_params = match &stream_info.params {
+            rust_media_core::StreamParams::Video(params) => params,
+            _ => {
+                return Err(Error::InvalidData(
+                    "VideoToolbox encoder requires video stream parameters".to_string(),
+                ))
+            }
+        };
+
+        let width = video_params.width as i32;
+        let height = video_params.height as i32;
+
+        // Create compression session
+        let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
+        let status = unsafe {
+            VTCompressionSessionCreate(
+                ptr::null(),
+                width,
+                height,
+                0x61766331, // kCMVideoCodecType_H264 = 'avc1'
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                Some(compression_output_callback),
+                ptr::null_mut(), // refcon set below
+                &mut session_ptr,
+            )
+        };
+        if status != 0 || session_ptr.is_null() {
+            return Err(Error::Encode(format!(
+                "VTCompressionSessionCreate failed: {}",
+                status
+            )));
+        }
+
+        let session = unsafe { Retained::retain(session_ptr) }
+            .ok_or_else(|| Error::Encode("Failed to retain compression session".to_string()))?;
+
+        // Configure session properties
+        Self::set_session_properties(&session, &config)?;
+
+        // Prepare to encode
+        let status = unsafe { VTCompressionSessionPrepareToEncodeFrames(session_ptr) };
+        if status != 0 {
+            return Err(Error::Encode(format!(
+                "VTCompressionSessionPrepareToEncodeFrames failed: {}",
+                status
+            )));
+        }
+
+        let ctx = Box::new(CompressionContext {
+            packets: VecDeque::new(),
+        });
+
+        // Set the callback refcon to point to our context.
+        // We'll pass it per-frame via sourceFrameRefcon.
+
+        Ok(Self {
+            stream_info,
+            session,
+            width,
+            height,
+            frame_count: 0,
+            buffered_packets: VecDeque::new(),
+            flushed: false,
+            callback_context: ctx,
+            avcc_record: Vec::new(),
+        })
+    }
+
+    /// Set VTCompressionSession properties from config.
+    fn set_session_properties(
+        session: &VTCompressionSession,
+        config: &VideoToolboxEncoderConfig,
+    ) -> Result<()> {
+        use objc2_video_toolbox::{
+            kVTCompressionPropertyKey_AverageBitRate,
+            kVTCompressionPropertyKey_MaxKeyFrameInterval,
+            kVTCompressionPropertyKey_AllowFrameReordering,
+            kVTCompressionPropertyKey_RealTime,
+            kVTCompressionPropertyKey_ProfileLevel,
+            kVTProfileLevel_H264_High_AutoLevel,
+            VTSessionSetProperty,
+        };
+        // Profile: High, auto level
+        let status = unsafe {
+            VTSessionSetProperty(
+                session,
+                kVTCompressionPropertyKey_ProfileLevel,
+                Some(kVTProfileLevel_H264_High_AutoLevel as &CFType),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Encode(format!(
+                "Failed to set profile level: {}",
+                status
+            )));
+        }
+
+        // Bitrate
+        let bitrate_num = CFNumber::new_i64(config.bitrate as i64);
+        let status = unsafe {
+            VTSessionSetProperty(
+                session,
+                kVTCompressionPropertyKey_AverageBitRate,
+                Some(&bitrate_num as &CFType),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Encode(format!(
+                "Failed to set bitrate: {}",
+                status
+            )));
+        }
+
+        // Max keyframe interval
+        let kf_num = CFNumber::new_i32(config.max_keyframe_interval as i32);
+        let status = unsafe {
+            VTSessionSetProperty(
+                session,
+                kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                Some(&kf_num as &CFType),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Encode(format!(
+                "Failed to set keyframe interval: {}",
+                status
+            )));
+        }
+
+        // Allow frame reordering (B-frames)
+        {
+            let reorder_num = CFNumber::new_i32(if config.allow_frame_reordering { 1 } else { 0 });
+            let status = unsafe {
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_AllowFrameReordering,
+                    Some(&reorder_num as &CFType),
+                )
+            };
+            if status != 0 {
+                return Err(Error::Encode(format!(
+                    "Failed to set frame reordering: {}",
+                    status
+                )));
+            }
+        }
+
+        // Realtime
+        if config.realtime {
+            let rt_num = CFNumber::new_i32(1);
+            let status = unsafe {
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_RealTime,
+                    Some(&rt_num as &CFType),
+                )
+            };
+            if status != 0 {
+                return Err(Error::Encode(format!(
+                    "Failed to set realtime: {}",
+                    status
+                )));
+            }
+        }
+
+        // Quality (only if explicitly set)
+        if let Some(q) = config.quality {
+            use objc2_video_toolbox::kVTCompressionPropertyKey_Quality;
+            let q_num = CFNumber::new_f32(q.clamp(0.0, 1.0));
+            let status = unsafe {
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_Quality,
+                    Some(&q_num as &CFType),
+                )
+            };
+            if status != 0 {
+                return Err(Error::Encode(format!(
+                    "Failed to set quality: {}",
+                    status
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create a CVPixelBuffer from a YUV420P frame and encode it.
+    fn encode_frame_internal(&mut self, frame: &Frame) -> Result<()> {
+        let y_plane = frame
+            .plane(0)
+            .ok_or_else(|| Error::InvalidData("Missing Y plane".to_string()))?;
+        let u_plane = frame
+            .plane(1)
+            .ok_or_else(|| Error::InvalidData("Missing U plane".to_string()))?;
+        let v_plane = frame
+            .plane(2)
+            .ok_or_else(|| Error::InvalidData("Missing V plane".to_string()))?;
+
+        let w = self.width as usize;
+        let h = self.height as usize;
+
+        // Create CVPixelBuffer (I420)
+        let mut pixel_buffer: *mut CVPixelBuffer = ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(
+                ptr::null(),
+                w,
+                h,
+                0x79343230, // kCVPixelFormatType_420YpCbCr8Planar = 'y420'
+                ptr::null(),
+                &mut pixel_buffer,
+            )
+        };
+        if status != 0 || pixel_buffer.is_null() {
+            return Err(Error::Encode(format!(
+                "CVPixelBufferCreate failed: {}",
+                status
+            )));
+        }
+
+        // Lock and copy plane data
+        unsafe {
+            CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+
+            let y_dst = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0) as *mut u8;
+            let u_dst = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1) as *mut u8;
+            let v_dst = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 2) as *mut u8;
+
+            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+            let u_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+            let v_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 2);
+
+            let chroma_h = h / 2;
+            let chroma_w = w / 2;
+
+            // Copy Y
+            for row in 0..h {
+                ptr::copy_nonoverlapping(
+                    y_plane[row * w..].as_ptr(),
+                    y_dst.add(row * y_stride),
+                    w,
+                );
+            }
+            // Copy U
+            for row in 0..chroma_h {
+                ptr::copy_nonoverlapping(
+                    u_plane[row * chroma_w..].as_ptr(),
+                    u_dst.add(row * u_stride),
+                    chroma_w,
+                );
+            }
+            // Copy V
+            for row in 0..chroma_h {
+                ptr::copy_nonoverlapping(
+                    v_plane[row * chroma_w..].as_ptr(),
+                    v_dst.add(row * v_stride),
+                    chroma_w,
+                );
+            }
+
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+        }
+
+        // Build presentation timestamp
+        let pts = frame.pts().unwrap_or(self.frame_count);
+        let (tb_num, tb_den) = self.stream_info.time_base;
+        let cm_pts = CMTime {
+            value: pts,
+            timescale: (tb_den as i32) / (tb_num.max(1) as i32),
+            flags: CMTimeFlags(1),
+            epoch: 0,
+        };
+
+        let duration = CMTime {
+            value: 1,
+            timescale: (tb_den as i32) / (tb_num.max(1) as i32),
+            flags: CMTimeFlags(1),
+            epoch: 0,
+        };
+
+        // Pass callback context as sourceFrameRefcon
+        let ctx_ptr = &mut *self.callback_context as *mut CompressionContext as *mut std::ffi::c_void;
+
+        let mut info_flags: u32 = 0;
+        let status = unsafe {
+            VTCompressionSessionEncodeFrame(
+                &*self.session as *const VTCompressionSession as *mut VTCompressionSession,
+                pixel_buffer,
+                cm_pts,
+                duration,
+                ptr::null(),
+                ctx_ptr,
+                &mut info_flags,
+            )
+        };
+
+        // Release the pixel buffer
+        unsafe {
+            CFRelease(pixel_buffer as *const std::ffi::c_void);
+        }
+
+        if status != 0 {
+            return Err(Error::Encode(format!(
+                "VTCompressionSessionEncodeFrame failed: {}",
+                status
+            )));
+        }
+
+        // Drain any packets that the callback produced
+        self.drain_callback_packets();
+
+        self.frame_count += 1;
+        Ok(())
+    }
+
+    /// Move packets from the callback context into our buffered_packets queue.
+    fn drain_callback_packets(&mut self) {
+        while let Some(pkt) = self.callback_context.packets.pop_front() {
+            self.buffered_packets.push_back(pkt);
+        }
+    }
+
+    /// Returns the avcC record. Only valid after at least one frame has been
+    /// encoded (the format description comes from the first output sample).
+    pub fn codec_config(&self) -> &[u8] {
+        &self.avcc_record
+    }
+}
+
+/// C callback invoked by VideoToolbox when an encoded sample is ready.
+unsafe extern "C-unwind" fn compression_output_callback(
+    output_callback_ref_con: *mut std::ffi::c_void,
+    source_frame_ref_con: *mut std::ffi::c_void,
+    status: i32,
+    _info_flags: u32,
+    sample_buffer: *mut CMSampleBuffer,
+) {
+    if status != 0 || sample_buffer.is_null() {
+        return;
+    }
+    // source_frame_ref_con is our CompressionContext
+    let ctx = if source_frame_ref_con.is_null() {
+        if output_callback_ref_con.is_null() {
+            return;
+        }
+        &mut *(output_callback_ref_con as *mut CompressionContext)
+    } else {
+        &mut *(source_frame_ref_con as *mut CompressionContext)
+    };
+
+    // Extract PTS and DTS using raw C APIs (safe wrappers have lifetime issues in callbacks)
+    let pts_time = CMSampleBufferGetPresentationTimeStamp(sample_buffer);
+    let dts_time = CMSampleBufferGetDecodeTimeStamp(sample_buffer);
+
+    let pts = if pts_time.flags.0 & 1 != 0 {
+        Some(pts_time.value)
+    } else {
+        None
+    };
+    let dts = if dts_time.flags.0 & 1 != 0 {
+        Some(dts_time.value)
+    } else {
+        None
+    };
+
+    // Check if keyframe by looking at sample attachments.
+    // If kCMSampleAttachmentKey_NotSync is absent, the sample is a sync
+    // (keyframe). We use the raw C APIs because the Rust wrappers return
+    // CFRetained which has tricky lifetime semantics in a C callback.
+    let is_keyframe = {
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sample_buffer,
+            0, // don't create
+        );
+        if attachments.is_null() {
+            true
+        } else if CFArrayGetCount(attachments) > 0 {
+            let dict = CFArrayGetValueAtIndex(attachments, 0);
+            if dict.is_null() {
+                true
+            } else {
+                let key = objc2_core_media::kCMSampleAttachmentKey_NotSync;
+                let val = CFDictionaryGetValue(
+                    dict,
+                    key as *const CFString as *const std::ffi::c_void,
+                );
+                val.is_null()
+            }
+        } else {
+            true
+        }
+    };
+
+    // Get encoded data from sample buffer
+    let data_buffer_ptr = CMSampleBufferGetDataBuffer(sample_buffer);
+    if data_buffer_ptr.is_null() {
+        return;
+    }
+    let data_len = CMBlockBufferGetDataLength(data_buffer_ptr);
+    let mut data = vec![0u8; data_len];
+    let copy_status = CMBlockBufferCopyDataBytes(
+        data_buffer_ptr,
+        0,
+        data_len,
+        data.as_mut_ptr() as *mut std::ffi::c_void,
+    );
+    if copy_status != 0 {
+        return;
+    }
+
+    let mut pkt = Packet::new(data, 0, MediaType::Video);
+    if let Some(p) = pts {
+        pkt.set_pts(Some(p));
+    }
+    if let Some(d) = dts {
+        pkt.set_dts(Some(d));
+    }
+    pkt.set_keyframe(is_keyframe);
+
+    ctx.packets.push_back(pkt);
+}
+
+impl Encoder for VideoToolboxH264Encoder {
+    fn codec(&self) -> &str {
+        "h264"
+    }
+
+    fn stream_info(&self) -> &StreamInfo {
+        &self.stream_info
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        if frame.media_type() != MediaType::Video {
+            return Err(Error::InvalidData(format!(
+                "Expected video frame, got {:?}",
+                frame.media_type()
+            )));
+        }
+
+        let frame_params = match frame.params() {
+            rust_media_core::frame::FrameParams::Video(p) => p,
+            _ => {
+                return Err(Error::InvalidData(
+                    "VideoToolbox encoder requires video frame params".to_string(),
+                ))
+            }
+        };
+
+        if frame_params.format != PixelFormat::YUV420P {
+            return Err(Error::Unsupported(format!(
+                "VideoToolbox H.264 encoder expects YUV420P, got {:?}",
+                frame_params.format
+            )));
+        }
+
+        self.encode_frame_internal(frame)
+    }
+
+    fn receive_packet(&mut self) -> Result<Packet> {
+        // Drain any pending callback packets
+        self.drain_callback_packets();
+
+        if let Some(pkt) = self.buffered_packets.pop_front() {
+            Ok(pkt)
+        } else if self.flushed {
+            Err(Error::EndOfStream)
+        } else {
+            Err(Error::NeedMoreData)
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // Force completion of all pending frames
+        let status = unsafe {
+            VTCompressionSessionCompleteFrames(
+                &*self.session as *const VTCompressionSession as *mut VTCompressionSession,
+                CMTime {
+                    value: 0,
+                    timescale: 0,
+                    flags: CMTimeFlags(0), // kCMTimeInvalid
+                    epoch: 0,
+                },
+            )
+        };
+        if status != 0 {
+            return Err(Error::Encode(format!(
+                "VTCompressionSessionCompleteFrames failed: {}",
+                status
+            )));
+        }
+
+        self.drain_callback_packets();
+        self.flushed = true;
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.frame_count = 0;
+        self.buffered_packets.clear();
+        self.callback_context.packets.clear();
+        self.flushed = false;
+        Ok(())
+    }
+
+    fn is_flushed(&self) -> bool {
+        self.flushed
+    }
+}
+
 // External C functions from VideoToolbox and CoreMedia.
 // Multiple #[link] attributes are intentional — each declares a separate
 // framework dependency. clippy::duplicated_attributes is a false positive here.
@@ -1390,6 +2017,93 @@ extern "C" {
     fn CVPixelBufferGetPixelFormatType(pixelBuffer: *mut CVPixelBuffer) -> u32;
     fn CVPixelBufferGetBaseAddressOfPlane(pixelBuffer: *mut CVPixelBuffer, planeIndex: usize) -> *mut std::ffi::c_void;
     fn CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer: *mut CVPixelBuffer, planeIndex: usize) -> usize;
+
+    // Encoder-specific functions
+    fn VTCompressionSessionCreate(
+        allocator: *const std::ffi::c_void,
+        width: i32,
+        height: i32,
+        codecType: u32,
+        encoderSpecification: *const std::ffi::c_void,
+        sourceImageBufferAttributes: *const std::ffi::c_void,
+        compressedDataAllocator: *const std::ffi::c_void,
+        outputCallback: Option<
+            unsafe extern "C-unwind" fn(
+                *mut std::ffi::c_void,
+                *mut std::ffi::c_void,
+                i32,
+                u32,
+                *mut CMSampleBuffer,
+            ),
+        >,
+        outputCallbackRefCon: *mut std::ffi::c_void,
+        compressionSessionOut: *mut *mut VTCompressionSession,
+    ) -> i32;
+
+    fn VTCompressionSessionEncodeFrame(
+        session: *mut VTCompressionSession,
+        imageBuffer: *mut CVPixelBuffer,
+        presentationTimeStamp: CMTime,
+        duration: CMTime,
+        frameProperties: *const std::ffi::c_void,
+        sourceFrameRefcon: *mut std::ffi::c_void,
+        infoFlagsOut: *mut u32,
+    ) -> i32;
+
+    fn VTCompressionSessionCompleteFrames(
+        session: *mut VTCompressionSession,
+        completeUntilPresentationTimeStamp: CMTime,
+    ) -> i32;
+
+    fn VTCompressionSessionPrepareToEncodeFrames(
+        session: *mut VTCompressionSession,
+    ) -> i32;
+
+    fn CVPixelBufferCreate(
+        allocator: *const std::ffi::c_void,
+        width: usize,
+        height: usize,
+        pixelFormatType: u32,
+        pixelBufferAttributes: *const std::ffi::c_void,
+        pixelBufferOut: *mut *mut CVPixelBuffer,
+    ) -> i32;
+
+    fn CFRelease(cf: *const std::ffi::c_void);
+
+    fn CFArrayGetCount(theArray: *const std::ffi::c_void) -> isize;
+    fn CFArrayGetValueAtIndex(
+        theArray: *const std::ffi::c_void,
+        idx: isize,
+    ) -> *const std::ffi::c_void;
+    fn CFDictionaryGetValue(
+        theDict: *const std::ffi::c_void,
+        key: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
+
+    // Raw C APIs used in the compression callback (can't use safe Rust wrappers
+    // due to lifetime constraints in extern "C" callbacks)
+    fn CMSampleBufferGetSampleAttachmentsArray(
+        sbuf: *mut CMSampleBuffer,
+        createIfNecessary: u8,
+    ) -> *const std::ffi::c_void;
+    fn CMSampleBufferGetDataBuffer(
+        sbuf: *mut CMSampleBuffer,
+    ) -> *mut CMBlockBuffer;
+    fn CMBlockBufferGetDataLength(
+        theBuffer: *mut CMBlockBuffer,
+    ) -> usize;
+    fn CMBlockBufferCopyDataBytes(
+        theBuffer: *mut CMBlockBuffer,
+        offsetToData: usize,
+        dataLength: usize,
+        destination: *mut std::ffi::c_void,
+    ) -> i32;
+    fn CMSampleBufferGetPresentationTimeStamp(
+        sbuf: *mut CMSampleBuffer,
+    ) -> CMTime;
+    fn CMSampleBufferGetDecodeTimeStamp(
+        sbuf: *mut CMSampleBuffer,
+    ) -> CMTime;
 }
 
 #[cfg(test)]

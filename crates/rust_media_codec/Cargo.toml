@@ -48,7 +48,7 @@ objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSDicti
 objc2-core-foundation = "0.3"
 objc2-core-media = { version = "0.3", features = ["CMFormatDescription", "CMSampleBuffer", "CMBlockBuffer", "CMTime"] }
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer"] }
-objc2-video-toolbox = { version = "0.3", features = ["VTDecompressionSession", "VTSession", "VTDecompressionProperties"] }
+objc2-video-toolbox = { version = "0.3", features = ["VTDecompressionSession", "VTSession", "VTDecompressionProperties", "VTCompressionSession", "VTCompressionProperties"] }
 
 [dev-dependencies]
 rust_media_format = { workspace = true }

@@ -2176,6 +2176,7 @@ fn build_vp9_config_from_opts(bitrate: u64, opts: &EncoderOptions) -> rust_media
 }
 
 #[cfg(feature = "gpl-x264")]
+#[allow(dead_code)] // unused when videotoolbox feature takes priority for h264
 fn build_x264_config_from_opts(opts: &EncoderOptions) -> rust_media_codec::X264EncoderConfig {
     let mut cfg = rust_media_codec::X264EncoderConfig::new();
     if let Some(speed) = opts.speed {
@@ -2358,11 +2359,32 @@ fn create_video_encoder(
             let encoder = rust_media_codec::Av1Encoder::with_config(stream_info, av1_config)?;
             Ok(Box::new(encoder))
         }
-        #[cfg(feature = "gpl-x264")]
         "h264" => {
-            let x264_config = build_x264_config_from_opts(encoder_opts);
-            let encoder = rust_media_codec::X264Encoder::with_config(stream_info, x264_config)?;
-            Ok(Box::new(encoder))
+            // On macOS with videotoolbox, prefer VideoToolbox (hardware accelerated, no GPL)
+            #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+            {
+                let mut vt_config = rust_media_codec::VideoToolboxEncoderConfig::new()
+                    .bitrate(bitrate);
+                if let Some(gop) = encoder_opts.gop_size {
+                    vt_config = vt_config.max_keyframe_interval(gop as u32);
+                }
+                if let Some(qp) = encoder_opts.qp {
+                    vt_config = vt_config.quality(1.0 - qp as f32 / 51.0);
+                }
+                let encoder = rust_media_codec::VideoToolboxH264Encoder::with_config(
+                    stream_info, vt_config,
+                )?;
+                return Ok(Box::new(encoder));
+            }
+            // Fall back to x264 (GPL) when VideoToolbox is not available
+            #[cfg(all(feature = "gpl-x264", not(all(target_os = "macos", feature = "videotoolbox"))))]
+            {
+                let x264_config = build_x264_config_from_opts(encoder_opts);
+                let encoder = rust_media_codec::X264Encoder::with_config(stream_info, x264_config)?;
+                return Ok(Box::new(encoder));
+            }
+            #[allow(unreachable_code)]
+            Err("No H.264 encoder available. Enable 'videotoolbox' (macOS) or 'gpl-x264' feature.".into())
         }
         _ => Err(format!("No encoder available for video codec: {}", codec).into()),
     }

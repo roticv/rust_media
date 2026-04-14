@@ -56,6 +56,10 @@ pub use audio::fdk_aac::{FdkAacDecoder, FdkAacEncoder};
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use video::videotoolbox::VideoToolboxH264Decoder;
 #[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use video::videotoolbox::VideoToolboxH264Encoder;
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
+pub use video::videotoolbox::VideoToolboxEncoderConfig;
+#[cfg(all(target_os = "macos", feature = "videotoolbox"))]
 pub use video::videotoolbox::VideoToolboxHevcDecoder;
 
 #[cfg(test)]
