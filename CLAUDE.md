@@ -277,7 +277,7 @@ Implement Packet and Frame abstractions with support for various media types. Th
   - Distinguishes WebM from MKV via EBML DocType field (reports format_name as "webm" or "matroska")
   - No muxer yet (use WebM muxer for VP8/VP9/Opus content)
 - ✅ **MP4** (ISO Base Media File Format): Demuxer + Muxer **IMPLEMENTED** in `rust_media_format/src/mp4/`
-  - Supports H.264/AVC (avc1), H.265/HEVC (hvc1/hev1), VP9 (vp09), AAC (mp4a), MP3 (.mp3), and Opus audio
+  - Supports H.264/AVC (avc1), H.265/HEVC (hvc1/hev1), VP9 (vp09), AV1 (av01) video; AAC (mp4a), MP3 (.mp3), and Opus audio
   - Muxer: Streaming API with incremental packet writing
   - Muxer: File structure: ftyp | mdat | moov (streaming-friendly)
   - Complete sample table support: stts, stsc, stsz, stco/co64, stss, ctts

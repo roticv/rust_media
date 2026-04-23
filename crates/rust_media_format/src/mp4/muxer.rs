@@ -45,6 +45,11 @@ use std::io::{Seek, SeekFrom, Write};
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
 
+/// HEVC NAL unit types (shifted by 1 bit in the NAL header)
+const HEVC_NAL_TYPE_VPS: u8 = 32;
+const HEVC_NAL_TYPE_SPS: u8 = 33;
+const HEVC_NAL_TYPE_PPS: u8 = 34;
+
 /// Finds the next Annex B start code (0x000001 or 0x00000001) in the data
 fn find_start_code(data: &[u8], offset: usize) -> Option<(usize, usize)> {
     let mut i = offset;
@@ -200,6 +205,149 @@ fn build_avcc(sps_list: &[Vec<u8>], pps_list: &[Vec<u8>]) -> Result<Vec<u8>> {
 }
 
 // ============================================================================
+// HEVC NAL Unit Utilities
+// ============================================================================
+
+/// VPS, SPS, PPS NAL unit lists extracted from HEVC data.
+type HevcParameterSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// Extracts VPS, SPS, and PPS NAL units from HEVC Annex B data.
+/// HEVC NAL type is in bits 1-6 of the first byte: `(nal[0] >> 1) & 0x3F`.
+fn extract_hevc_parameter_sets(data: &[u8]) -> HevcParameterSets {
+    let nal_units = parse_annex_b_nal_units(data);
+    let mut vps_list = Vec::new();
+    let mut sps_list = Vec::new();
+    let mut pps_list = Vec::new();
+
+    for nal in nal_units {
+        if nal.is_empty() {
+            continue;
+        }
+        let nal_type = (nal[0] >> 1) & 0x3F;
+        match nal_type {
+            HEVC_NAL_TYPE_VPS => vps_list.push(nal),
+            HEVC_NAL_TYPE_SPS => sps_list.push(nal),
+            HEVC_NAL_TYPE_PPS => pps_list.push(nal),
+            _ => {}
+        }
+    }
+
+    (vps_list, sps_list, pps_list)
+}
+
+/// Converts HEVC Annex B data to length-prefixed format, stripping VPS/SPS/PPS.
+fn annex_b_to_hvcc_data(data: &[u8]) -> Vec<u8> {
+    let nal_units = parse_annex_b_nal_units(data);
+    let mut out = Vec::new();
+
+    for nal in nal_units {
+        if nal.is_empty() {
+            continue;
+        }
+        let nal_type = (nal[0] >> 1) & 0x3F;
+        if nal_type == HEVC_NAL_TYPE_VPS
+            || nal_type == HEVC_NAL_TYPE_SPS
+            || nal_type == HEVC_NAL_TYPE_PPS
+        {
+            continue; // Parameter sets go in hvcC box, not in frame data
+        }
+        let len = nal.len() as u32;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&nal);
+    }
+
+    out
+}
+
+/// Checks if data is already in hvcC format (starts with configurationVersion = 1).
+fn is_hvcc_format(data: &[u8]) -> bool {
+    !data.is_empty() && data[0] == 1
+}
+
+/// Builds an HEVCDecoderConfigurationRecord (hvcC) from VPS, SPS, and PPS NAL arrays.
+fn build_hvcc(
+    vps_list: &[Vec<u8>],
+    sps_list: &[Vec<u8>],
+    pps_list: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    if sps_list.is_empty() {
+        return Err(Error::InvalidData(
+            "HEVC stream requires at least one SPS".to_string(),
+        ));
+    }
+
+    // We build a minimal but valid HEVCDecoderConfigurationRecord.
+    // Most fields are zeroed (general profile/level info) — the SPS itself
+    // carries the authoritative values and decoders parse it at runtime.
+    let mut hvcc = Vec::new();
+
+    hvcc.push(1); // configurationVersion
+
+    // general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5)
+    hvcc.push(0);
+    // general_profile_compatibility_flags (4 bytes)
+    hvcc.extend_from_slice(&[0u8; 4]);
+    // general_constraint_indicator_flags (6 bytes)
+    hvcc.extend_from_slice(&[0u8; 6]);
+    // general_level_idc
+    hvcc.push(0);
+    // min_spatial_segmentation_idc (12 bits) with 4 reserved bits = 0xF000
+    hvcc.extend_from_slice(&[0xF0, 0x00]);
+    // parallelismType (2 bits) with 6 reserved bits = 0xFC
+    hvcc.push(0xFC);
+    // chromaFormat (2 bits) with 6 reserved bits = 0xFC | 1 (4:2:0)
+    hvcc.push(0xFC | 1);
+    // bitDepthLumaMinus8 (3 bits) with 5 reserved bits = 0xF8
+    hvcc.push(0xF8);
+    // bitDepthChromaMinus8 (3 bits) with 5 reserved bits = 0xF8
+    hvcc.push(0xF8);
+    // avgFrameRate (u16)
+    hvcc.extend_from_slice(&[0x00, 0x00]);
+    // constantFrameRate(2) | numTemporalLayers(3) | temporalIdNested(1) | lengthSizeMinusOne(2)
+    // = 0 | 1<<3 | 1<<2 | 3 = 0x0F
+    hvcc.push(0x0F);
+
+    // numOfArrays
+    let mut num_arrays = 0u8;
+    if !vps_list.is_empty() {
+        num_arrays += 1;
+    }
+    if !sps_list.is_empty() {
+        num_arrays += 1;
+    }
+    if !pps_list.is_empty() {
+        num_arrays += 1;
+    }
+    hvcc.push(num_arrays);
+
+    // Write each parameter set array
+    let write_array = |hvcc: &mut Vec<u8>, nal_type: u8, nals: &[Vec<u8>]| {
+        // array_completeness(1) | reserved(1) | NAL_unit_type(6)
+        hvcc.push(0x80 | (nal_type & 0x3F));
+        // numNalus (u16)
+        let count = nals.len() as u16;
+        hvcc.extend_from_slice(&count.to_be_bytes());
+        for nal in nals {
+            let len = nal.len() as u16;
+            hvcc.extend_from_slice(&len.to_be_bytes());
+            hvcc.extend_from_slice(nal);
+        }
+    };
+
+    if !vps_list.is_empty() {
+        write_array(&mut hvcc, HEVC_NAL_TYPE_VPS, vps_list);
+    }
+    if !sps_list.is_empty() {
+        write_array(&mut hvcc, HEVC_NAL_TYPE_SPS, sps_list);
+    }
+    if !pps_list.is_empty() {
+        write_array(&mut hvcc, HEVC_NAL_TYPE_PPS, pps_list);
+    }
+
+    Ok(hvcc)
+}
+
+// ============================================================================
 // MP4 Muxer Data Structures
 // ============================================================================
 
@@ -252,14 +400,18 @@ struct TrackData {
     needs_ctts: bool,
     /// Whether this track uses H.264 (needs Annex B to AVCC conversion)
     is_h264: bool,
-    /// Extracted SPS NAL units (for H.264)
+    /// Whether this track uses HEVC (needs Annex B to HVCC conversion)
+    is_hevc: bool,
+    /// Extracted SPS NAL units (for H.264 or HEVC)
     sps_list: Vec<Vec<u8>>,
-    /// Extracted PPS NAL units (for H.264)
+    /// Extracted PPS NAL units (for H.264 or HEVC)
     pps_list: Vec<Vec<u8>>,
+    /// Extracted VPS NAL units (HEVC only)
+    vps_list: Vec<Vec<u8>>,
 }
 
 impl TrackData {
-    fn new(timescale: u32, is_h264: bool) -> Self {
+    fn new(timescale: u32, is_h264: bool, is_hevc: bool) -> Self {
         Self {
             sample_sizes: Vec::new(),
             chunk_offsets: Vec::new(),
@@ -273,8 +425,10 @@ impl TrackData {
             timescale,
             needs_ctts: false,
             is_h264,
+            is_hevc,
             sps_list: Vec::new(),
             pps_list: Vec::new(),
+            vps_list: Vec::new(),
         }
     }
 
@@ -434,6 +588,7 @@ impl<W: Write + Seek> Mp4Muxer<W> {
         match media_type {
             MediaType::Video => match codec {
                 "h264" | "avc" | "avc1" => Ok(()),
+                "hevc" | "h265" | "hvc1" | "hev1" => Ok(()),
                 "vp9" | "vp09" => Ok(()),
                 "av1" | "av01" => Ok(()),
                 _ => Err(Error::Unsupported(format!(
@@ -797,6 +952,7 @@ impl<W: Write + Seek> Mp4Muxer<W> {
 
         let box_type = match codec {
             "h264" | "avc" | "avc1" => AVC1,
+            "hevc" | "h265" | "hvc1" | "hev1" => HVC1,
             "vp9" | "vp09" => VP09,
             "av1" | "av01" => AV01,
             _ => {
@@ -828,6 +984,7 @@ impl<W: Write + Seek> Mp4Muxer<W> {
         // Write codec-specific configuration box
         match codec {
             "h264" | "avc" | "avc1" => self.write_avcc(track_index)?,
+            "hevc" | "h265" | "hvc1" | "hev1" => self.write_hvcc(track_index)?,
             "vp9" | "vp09" => self.write_vpcc(track_index)?,
             "av1" | "av01" => self.write_av1c(track_index)?,
             _ => {}
@@ -921,6 +1078,48 @@ impl<W: Write + Seek> Mp4Muxer<W> {
         self.writer.write_all(&extra_data)?;
         let av1c_end = self.writer.stream_position()?;
         update_box_size(&mut self.writer, av1c_start, (av1c_end - av1c_start) as u32)?;
+        Ok(())
+    }
+
+    /// Writes the hvcC (HEVC decoder configuration) box.
+    fn write_hvcc(&mut self, track_index: usize) -> Result<()> {
+        let extra_data = self.streams[track_index].extra_data.clone();
+        let vps_list = self.track_data[track_index].vps_list.clone();
+        let sps_list = self.track_data[track_index].sps_list.clone();
+        let pps_list = self.track_data[track_index].pps_list.clone();
+
+        let hvcc_start = write_box_header_placeholder(&mut self.writer, HVCC)?;
+
+        // Case 1: extra_data is already in hvcC format
+        if is_hvcc_format(&extra_data) {
+            self.writer.write_all(&extra_data)?;
+        }
+        // Case 2: We have extracted VPS/SPS/PPS from extra_data or packets
+        else if !sps_list.is_empty() {
+            let hvcc_data = build_hvcc(&vps_list, &sps_list, &pps_list)?;
+            self.writer.write_all(&hvcc_data)?;
+        }
+        // Case 3: Try to parse extra_data as Annex B
+        else if !extra_data.is_empty() {
+            let (vps, sps, pps) = extract_hevc_parameter_sets(&extra_data);
+            if !sps.is_empty() {
+                let hvcc_data = build_hvcc(&vps, &sps, &pps)?;
+                self.writer.write_all(&hvcc_data)?;
+            } else {
+                return Err(Error::InvalidData(
+                    "HEVC stream requires VPS/SPS/PPS in extra_data or first keyframe".to_string(),
+                ));
+            }
+        }
+        // Case 4: No parameter sets available
+        else {
+            return Err(Error::InvalidData(
+                "HEVC stream requires VPS/SPS/PPS. Provide extra_data or ensure first packet contains headers.".to_string(),
+            ));
+        }
+
+        let hvcc_end = self.writer.stream_position()?;
+        update_box_size(&mut self.writer, hvcc_start, (hvcc_end - hvcc_start) as u32)?;
         Ok(())
     }
 
@@ -1246,23 +1445,31 @@ impl<W: Write + Seek> Muxer for Mp4Muxer<W> {
         // Calculate timescale from time_base
         let timescale = stream_info.time_base.1; // denominator is samples per second
 
-        // Check if this is an H.264 stream
         let is_h264 = matches!(stream_info.codec.as_str(), "h264" | "avc" | "avc1");
+        let is_hevc = matches!(stream_info.codec.as_str(), "hevc" | "h265" | "hvc1" | "hev1");
 
         let index = self.streams.len();
         let mut stream = stream_info;
         stream.index = index;
 
-        // Create track data
-        let mut track_data = TrackData::new(timescale, is_h264);
+        let mut track_data = TrackData::new(timescale, is_h264, is_hevc);
 
-        // Extract SPS/PPS from extra_data if available and it's H.264
+        // Extract parameter sets from extra_data if available
         if is_h264 && !stream.extra_data.is_empty() {
             if is_avcc_format(&stream.extra_data) {
                 // Already in avcC format - we'll use it directly in write_avcc
             } else {
-                // Annex B format - extract SPS/PPS
                 let (sps, pps) = extract_sps_pps(&stream.extra_data);
+                track_data.sps_list = sps;
+                track_data.pps_list = pps;
+            }
+        }
+        if is_hevc && !stream.extra_data.is_empty() {
+            if is_hvcc_format(&stream.extra_data) {
+                // Already in hvcC format - we'll use it directly in write_hvcc
+            } else {
+                let (vps, sps, pps) = extract_hevc_parameter_sets(&stream.extra_data);
+                track_data.vps_list = vps;
                 track_data.sps_list = sps;
                 track_data.pps_list = pps;
             }
@@ -1320,6 +1527,7 @@ impl<W: Write + Seek> Muxer for Mp4Muxer<W> {
         let is_video = self.streams[stream_index].media_type == MediaType::Video;
         let is_keyframe = packet.is_keyframe();
         let is_h264 = self.track_data[stream_index].is_h264;
+        let is_hevc = self.track_data[stream_index].is_hevc;
 
         // Get timestamps, using 0 as default
         let pts = packet.pts().unwrap_or(0);
@@ -1334,12 +1542,29 @@ impl<W: Write + Seek> Muxer for Mp4Muxer<W> {
         // Record the chunk offset (current position in mdat)
         let offset = self.position;
 
-        // Handle H.264 data conversion
+        // Handle Annex B → length-prefix conversion for H.264 and HEVC
         let data = packet.data();
-        let write_data: std::borrow::Cow<[u8]> = if is_h264 {
-            // For H.264, check if data is in Annex B format and convert to AVCC
+        let write_data: std::borrow::Cow<[u8]> = if is_hevc {
             if find_start_code(data, 0).is_some() {
-                // Annex B format detected - extract SPS/PPS from keyframes
+                // Extract VPS/SPS/PPS from keyframes
+                if is_keyframe && self.track_data[stream_index].sps_list.is_empty() {
+                    let (vps, sps, pps) = extract_hevc_parameter_sets(data);
+                    if !sps.is_empty() {
+                        self.track_data[stream_index].vps_list = vps;
+                        self.track_data[stream_index].sps_list = sps;
+                        self.track_data[stream_index].pps_list = pps;
+                    }
+                }
+                let hvcc_data = annex_b_to_hvcc_data(data);
+                if hvcc_data.is_empty() {
+                    return Ok(());
+                }
+                std::borrow::Cow::Owned(hvcc_data)
+            } else {
+                std::borrow::Cow::Borrowed(data)
+            }
+        } else if is_h264 {
+            if find_start_code(data, 0).is_some() {
                 if is_keyframe && self.track_data[stream_index].sps_list.is_empty() {
                     let (sps, pps) = extract_sps_pps(data);
                     if !sps.is_empty() {

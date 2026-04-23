@@ -110,7 +110,7 @@ This project is in active development. Current status:
 - ✅ **WAV** demuxer + muxer (PCM audio)
 - ✅ **WebM** demuxer + muxer (VP8/VP9/AV1 video, Opus/Vorbis audio)
 - ✅ **MKV** (Matroska) demuxer (H.264, H.265/HEVC, VP8/VP9/AV1 video; AAC, MP3, FLAC, AC3, Opus, Vorbis, PCM audio) - shares EBML parser with WebM
-- ✅ **MP4** demuxer + muxer (H.264, H.265/HEVC, VP9 video; AAC, MP3, Opus audio)
+- ✅ **MP4** demuxer + muxer (H.264, H.265/HEVC, VP9, AV1 video; AAC, MP3, Opus audio)
 
 ### Codecs
 - ✅ **PCM** codec (decoder + encoder)
